@@ -1,5 +1,18 @@
 # InPockets — Flutter customer app
 
+<!-- readme-sync-bot:toc:start -->
+## Table of Contents
+
+- [1. Run the backend](#1-run-the-backend)
+- [2. Turn this folder into a runnable Flutter project](#2-turn-this-folder-into-a-runnable-flutter-project)
+- [3. Add camera permission strings](#3-add-camera-permission-strings)
+- [4. Point the app at your backend and run](#4-point-the-app-at-your-backend-and-run)
+- [What's built](#whats-built)
+- [Known gaps to close before this is investor-demo-ready](#known-gaps-to-close-before-this-is-investor-demo-ready)
+- [Architecture notes](#architecture-notes)
+- [📋 Recommended Sections Checklist](#-recommended-sections-checklist)
+<!-- readme-sync-bot:toc:end -->
+
 This is the borrower-facing mobile app for InPockets, built against the real
 `inpockets-main` FastAPI backend (phone+OTP auth, onboarding, PAN/KYC/identity
 verification, loan applications). It talks to real endpoints — there is no
@@ -127,3 +140,16 @@ machine. State management is Riverpod (StateNotifier/AsyncValue), routing
 is `go_router` with a Riverpod-driven auth+onboarding redirect guard, and
 networking is a single Dio client (`lib/core/network/api_client.dart`)
 that every repository shares.
+
+<!-- readme-sync-bot:checklist:start -->
+## 📋 Recommended Sections Checklist
+
+_The bot can't write these automatically — they need your judgment, not a diff. This list updates itself as you add them:_
+
+- [ ] License
+- [ ] Author / Contact
+- [ ] Contributing Guidelines
+- [ ] Acknowledgements
+- [ ] Testing
+- [ ] Deployment
+<!-- readme-sync-bot:checklist:end -->
