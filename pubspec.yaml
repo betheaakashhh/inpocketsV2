@@ -1,0 +1,50 @@
+name: inpockets
+description: InPockets — digital lending, done right.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management
+  flutter_riverpod: ^2.5.1
+
+  # Navigation
+  go_router: ^14.2.7
+
+  # Networking
+  dio: ^5.5.0+1
+
+  # Secure token storage (Keychain / Keystore backed)
+  flutter_secure_storage: ^9.2.2
+
+  # Lightweight, non-secret local prefs (e.g. "seen onboarding intro")
+  shared_preferences: ^2.3.2
+
+  # Typography
+  google_fonts: ^6.2.1
+
+  # Camera roll / camera capture for selfie + document photos
+  image_picker: ^1.1.2
+
+  # Formatting: currency (₹), dates
+  intl: ^0.19.0
+
+  # Opening the KYC provider's consent URL externally
+  url_launcher: ^6.3.1
+
+  # Standard Flutter template default icon set
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
