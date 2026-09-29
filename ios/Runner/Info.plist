@@ -28,7 +28,6 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>InPockets uses your camera to verify your identity.</string>
-	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
