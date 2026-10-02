@@ -68,6 +68,11 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       if (photo != null && mounted) {
         final image = File(photo.path);
         final bytesLength = await image.length();
+
+        // The State may have been disposed while the asynchronous file read
+        // was in progress (for example, after onboarding completion redirects).
+        if (!mounted) return;
+
         setState(() {
           _capturedImage = image;
           _captureRef =
