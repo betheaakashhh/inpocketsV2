@@ -1,0 +1,2308 @@
+diff --git a/lib/core/router/app_router.dart b/lib/core/router/app_router.dart
+index ae62c6f..5fe2155 100644
+--- a/lib/core/router/app_router.dart
++++ b/lib/core/router/app_router.dart
+@@ -9,6 +9,13 @@ import '../../features/documents/presentation/documents_screen.dart';
+ import '../../features/home/presentation/home_shell.dart';
+ import '../../features/loans/presentation/loan_apply_screen.dart';
+ import '../../features/loans/presentation/loan_detail_screen.dart';
++import '../../features/loan_lifecycle/data/loan_lifecycle_models.dart';
++import '../../features/loan_lifecycle/presentation/agreement_esign_screen.dart';
++import '../../features/loan_lifecycle/presentation/bank_verification_screen.dart';
++import '../../features/loan_lifecycle/presentation/disbursement_status_screen.dart';
++import '../../features/loan_lifecycle/presentation/kfs_screen.dart';
++import '../../features/loan_lifecycle/presentation/loan_offer_screen.dart';
++import '../../features/loan_lifecycle/presentation/repayment_screen.dart';
+ import '../../features/onboarding/application/onboarding_controller.dart';
+ import '../../features/onboarding/presentation/identity_verification_screen.dart';
+ import '../../features/onboarding/presentation/kyc_screen.dart';
+@@ -90,6 +97,45 @@ final appRouterProvider = Provider<GoRouter>((ref) {
+           applicationId: state.pathParameters['id']!,
+         ),
+       ),
++      GoRoute(
++        path: RoutePaths.loanOfferPattern,
++        builder: (context, state) {
++          final extra = state.extra as Map<String, dynamic>?;
++          return LoanOfferScreen(
++            applicationId: state.pathParameters['id']!,
++            requestedAmount: (extra?['requestedAmount'] as num?) ?? 0,
++            requestedTenureDays: (extra?['requestedTenureDays'] as int?) ?? 30,
++          );
++        },
++      ),
++      GoRoute(
++        path: RoutePaths.loanKfsPattern,
++        builder: (context, state) => KfsScreen(offer: state.extra as LoanOffer),
++      ),
++      GoRoute(
++        path: RoutePaths.loanAgreementPattern,
++        builder: (context, state) => AgreementESignScreen(
++          applicationId: state.pathParameters['id']!,
++        ),
++      ),
++      GoRoute(
++        path: RoutePaths.loanBankAccountPattern,
++        builder: (context, state) => BankVerificationScreen(
++          applicationId: state.pathParameters['id']!,
++        ),
++      ),
++      GoRoute(
++        path: RoutePaths.loanDisbursementPattern,
++        builder: (context, state) => DisbursementStatusScreen(
++          applicationId: state.pathParameters['id']!,
++        ),
++      ),
++      GoRoute(
++        path: RoutePaths.loanRepaymentPattern,
++        builder: (context, state) => RepaymentScreen(
++          applicationId: state.pathParameters['id']!,
++        ),
++      ),
+       GoRoute(
+         path: RoutePaths.documents,
+         builder: (context, state) => const DocumentsScreen(),
+diff --git a/lib/core/router/route_paths.dart b/lib/core/router/route_paths.dart
+index ae51662..1d45f12 100644
+--- a/lib/core/router/route_paths.dart
++++ b/lib/core/router/route_paths.dart
+@@ -18,6 +18,18 @@ class RoutePaths {
+   static String loanDetail(String id) => '/loans/$id';
+   static const loanDetailPattern = '/loans/:id';
+ 
++  static String loanOffer(String id) => '/loans/$id/offer';
++  static const loanOfferPattern = '/loans/:id/offer';
++  static const loanKfsPattern = '/loans/:id/kfs';
++  static String loanAgreement(String id) => '/loans/$id/agreement';
++  static const loanAgreementPattern = '/loans/:id/agreement';
++  static String loanBankAccount(String id) => '/loans/$id/bank-account';
++  static const loanBankAccountPattern = '/loans/:id/bank-account';
++  static String loanDisbursement(String id) => '/loans/$id/disbursement';
++  static const loanDisbursementPattern = '/loans/:id/disbursement';
++  static String loanRepayment(String id) => '/loans/$id/repayment';
++  static const loanRepaymentPattern = '/loans/:id/repayment';
++
+   static const documents = '/documents';
+   static const sessions = '/profile/sessions';
+ }
+diff --git a/lib/features/loan_lifecycle/application/loan_journey_controller.dart b/lib/features/loan_lifecycle/application/loan_journey_controller.dart
+new file mode 100644
+index 0000000..245e84f
+--- /dev/null
++++ b/lib/features/loan_lifecycle/application/loan_journey_controller.dart
+@@ -0,0 +1,212 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../data/loan_lifecycle_models.dart';
++import '../data/mock_loan_lifecycle_repository.dart';
++
++/// Kept alive for the whole app session (not autoDispose) — this is what
++/// makes the mock feel real: navigate away from the repayment screen and
++/// back, and your payment history is still there. Swap this single line
++/// for a `Provider<LoanLifecycleRepository>((ref) => HttpLoanLifecycleRepository(...))`
++/// once the backend exists; every screen below is unaffected.
++final loanLifecycleRepositoryProvider = Provider<MockLoanLifecycleRepository>((ref) {
++  return MockLoanLifecycleRepository();
++});
++
++/// One controller per loan application — bundles everything that screen
++/// needs (offer, KFS, agreement, bank account, disbursement, active loan,
++/// schedule) into a single loadable snapshot, same pattern as
++/// OnboardingController.
++class LoanJourneySnapshot {
++  const LoanJourneySnapshot({
++    this.offer,
++    this.kfs,
++    this.agreement,
++    this.bankAccount,
++    this.disbursement,
++    this.activeLoan,
++    this.schedule,
++    this.payments = const [],
++  });
++
++  final LoanOffer? offer;
++  final KfsDocument? kfs;
++  final LoanAgreement? agreement;
++  final BankAccount? bankAccount;
++  final Disbursement? disbursement;
++  final ActiveLoan? activeLoan;
++  final RepaymentSchedule? schedule;
++  final List<Payment> payments;
++
++  LoanJourneySnapshot copyWith({
++    LoanOffer? offer,
++    KfsDocument? kfs,
++    LoanAgreement? agreement,
++    BankAccount? bankAccount,
++    Disbursement? disbursement,
++    ActiveLoan? activeLoan,
++    RepaymentSchedule? schedule,
++    List<Payment>? payments,
++  }) {
++    return LoanJourneySnapshot(
++      offer: offer ?? this.offer,
++      kfs: kfs ?? this.kfs,
++      agreement: agreement ?? this.agreement,
++      bankAccount: bankAccount ?? this.bankAccount,
++      disbursement: disbursement ?? this.disbursement,
++      activeLoan: activeLoan ?? this.activeLoan,
++      schedule: schedule ?? this.schedule,
++      payments: payments ?? this.payments,
++    );
++  }
++}
++
++class LoanJourneyController extends StateNotifier<AsyncValue<LoanJourneySnapshot>> {
++  LoanJourneyController(this._repository, this.applicationId)
++      : super(const AsyncValue.loading()) {
++    load();
++  }
++
++  final MockLoanLifecycleRepository _repository;
++  final String applicationId;
++
++  Future<void> load() async {
++    state = const AsyncValue.loading();
++    state = await AsyncValue.guard(() async {
++      final offer = await _repository.getOffer(applicationId);
++      final bankAccount = await _repository.getBankAccount(applicationId);
++      final disbursement = await _repository.getDisbursement(applicationId);
++      final activeLoan = await _repository.getActiveLoan(applicationId);
++
++      KfsDocument? kfs;
++      LoanAgreement? agreement;
++      if (offer != null) {
++        kfs = await _repository.getKfs(offer.id);
++        agreement = await _repository.getAgreement(offer.id);
++      }
++
++      RepaymentSchedule? schedule;
++      List<Payment> payments = const [];
++      if (activeLoan != null) {
++        schedule = await _repository.getRepaymentSchedule(activeLoan.id);
++        payments = await _repository.getPaymentHistory(activeLoan.id);
++      }
++
++      return LoanJourneySnapshot(
++        offer: offer,
++        kfs: kfs,
++        agreement: agreement,
++        bankAccount: bankAccount,
++        disbursement: disbursement,
++        activeLoan: activeLoan,
++        schedule: schedule,
++        payments: payments,
++      );
++    });
++  }
++
++  Future<void> refreshQuietly() async {
++    final result = await AsyncValue.guard(() async {
++      final current = state.value;
++      final offer = await _repository.getOffer(applicationId);
++      final disbursement = await _repository.getDisbursement(applicationId);
++      final activeLoan = await _repository.getActiveLoan(applicationId);
++
++      RepaymentSchedule? schedule = current?.schedule;
++      List<Payment> payments = current?.payments ?? const [];
++      if (activeLoan != null) {
++        schedule = await _repository.getRepaymentSchedule(activeLoan.id);
++        payments = await _repository.getPaymentHistory(activeLoan.id);
++      }
++
++      return (current ?? const LoanJourneySnapshot()).copyWith(
++        offer: offer,
++        disbursement: disbursement,
++        activeLoan: activeLoan,
++        schedule: schedule,
++        payments: payments,
++      );
++    });
++    result.whenData((snapshot) => state = AsyncValue.data(snapshot));
++  }
++
++  Future<void> generateOfferIfNeeded({
++    required num requestedAmount,
++    required int requestedTenureDays,
++  }) async {
++    await _repository.ensureOfferGenerated(
++      applicationId: applicationId,
++      requestedAmount: requestedAmount,
++      requestedTenureDays: requestedTenureDays,
++    );
++    await load();
++  }
++
++  Future<void> acceptOffer() async {
++    final offer = state.value?.offer;
++    if (offer == null) return;
++    await _repository.acceptOffer(offer.id);
++    await load();
++  }
++
++  Future<void> initiateESign() async {
++    final agreement = state.value?.agreement;
++    if (agreement == null) return;
++    await _repository.initiateESign(agreement.id);
++    await load();
++  }
++
++  Future<void> completeESign() async {
++    final agreement = state.value?.agreement;
++    if (agreement == null) return;
++    await _repository.completeESign(agreement.id);
++    await load();
++  }
++
++  Future<void> submitBankAccount({
++    required String accountHolderName,
++    required String accountNumber,
++    required String ifsc,
++  }) async {
++    await _repository.submitBankAccount(
++      applicationId: applicationId,
++      accountHolderName: accountHolderName,
++      accountNumber: accountNumber,
++      ifsc: ifsc,
++    );
++    await load();
++  }
++
++  Future<void> initiateDisbursement() async {
++    final offer = state.value?.offer;
++    if (offer == null) return;
++    await _repository.initiateDisbursement(
++      applicationId: applicationId,
++      amount: offer.disbursableAmount,
++    );
++    await load();
++  }
++
++  Future<void> makePayment({
++    required num amount,
++    required PaymentMethod method,
++    required List<int> installmentNumbers,
++  }) async {
++    final loan = state.value?.activeLoan;
++    if (loan == null) return;
++    await _repository.makePayment(
++      loanId: loan.id,
++      amount: amount,
++      method: method,
++      installmentNumbers: installmentNumbers,
++    );
++    await load();
++  }
++}
++
++final loanJourneyControllerProvider = StateNotifierProvider.family<
++    LoanJourneyController, AsyncValue<LoanJourneySnapshot>, String>((ref, applicationId) {
++  return LoanJourneyController(
++    ref.watch(loanLifecycleRepositoryProvider),
++    applicationId,
++  );
++});
+diff --git a/lib/features/loan_lifecycle/data/loan_lifecycle_models.dart b/lib/features/loan_lifecycle/data/loan_lifecycle_models.dart
+new file mode 100644
+index 0000000..6b6e69b
+--- /dev/null
++++ b/lib/features/loan_lifecycle/data/loan_lifecycle_models.dart
+@@ -0,0 +1,259 @@
++/// Models for everything between "loan approved" and "loan closed" —
++/// offer, KFS, agreement/e-sign, bank verification, disbursement,
++/// repayment. None of this exists in the backend yet (see handbook.txt
++/// §18–26 / Phase 2 PDF §2.8–2.12) — these are the exact shapes a real
++/// implementation should return, so wiring it in later is a data-source
++/// swap, not a UI rewrite.
++
++// ---------------------------------------------------------------------
++// Loan Offer (handbook §18)
++// ---------------------------------------------------------------------
++
++enum OfferStatus { issued, accepted, declined, expired }
++
++class LoanOffer {
++  const LoanOffer({
++    required this.id,
++    required this.applicationId,
++    required this.approvedAmount,
++    required this.disbursableAmount,
++    required this.tenureDays,
++    required this.annualInterestRatePercent,
++    required this.processingFee,
++    required this.otherCharges,
++    required this.apr,
++    required this.totalRepaymentAmount,
++    required this.emiAmount,
++    required this.issuedAt,
++    required this.expiresAt,
++    required this.version,
++    required this.status,
++    required this.lenderName,
++  });
++
++  final String id;
++  final String applicationId;
++  final num approvedAmount;
++  final num disbursableAmount; // approvedAmount minus upfront fees
++  final int tenureDays;
++  final double annualInterestRatePercent;
++  final num processingFee;
++  final num otherCharges;
++  final double apr; // annual percentage rate, all-in cost of credit
++  final num totalRepaymentAmount;
++  final num emiAmount;
++  final DateTime issuedAt;
++  final DateTime expiresAt;
++  final int version;
++  final OfferStatus status;
++  final String lenderName;
++
++  bool get isExpired => DateTime.now().isAfter(expiresAt);
++}
++
++// ---------------------------------------------------------------------
++// KFS — Key Facts Statement (handbook §19)
++// ---------------------------------------------------------------------
++
++class KfsLineItem {
++  const KfsLineItem({required this.label, required this.value});
++  final String label;
++  final String value;
++}
++
++class KfsDocument {
++  const KfsDocument({
++    required this.id,
++    required this.offerId,
++    required this.version,
++    required this.generatedAt,
++    required this.lineItems,
++  });
++
++  final String id;
++  final String offerId;
++  final int version;
++  final DateTime generatedAt;
++  final List<KfsLineItem> lineItems;
++}
++
++// ---------------------------------------------------------------------
++// Loan Agreement + e-Sign (handbook §20–21)
++// ---------------------------------------------------------------------
++
++enum ESignStatus { initiated, pending, signed, failed, expired, manualReview }
++
++class LoanAgreement {
++  const LoanAgreement({
++    required this.id,
++    required this.offerId,
++    required this.version,
++    required this.createdAt,
++    required this.signingStatus,
++    this.signedAt,
++    this.providerRef,
++  });
++
++  final String id;
++  final String offerId;
++  final int version;
++  final DateTime createdAt;
++  final ESignStatus signingStatus;
++  final DateTime? signedAt;
++  final String? providerRef;
++}
++
++// ---------------------------------------------------------------------
++// Bank account verification (handbook §22)
++// ---------------------------------------------------------------------
++
++enum BankVerificationStatus { notStarted, pending, verified, failed, manualReview }
++
++class BankAccount {
++  const BankAccount({
++    required this.id,
++    required this.accountHolderName,
++    required this.accountNumberMasked,
++    required this.ifsc,
++    required this.bankName,
++    required this.status,
++    this.failureReason,
++  });
++
++  final String id;
++  final String accountHolderName;
++  final String accountNumberMasked;
++  final String ifsc;
++  final String bankName;
++  final BankVerificationStatus status;
++  final String? failureReason;
++}
++
++// ---------------------------------------------------------------------
++// Disbursement (handbook §23)
++// ---------------------------------------------------------------------
++
++enum DisbursementStatus { pending, processing, success, failed, reversed, requiresReview }
++
++class Disbursement {
++  const Disbursement({
++    required this.id,
++    required this.loanId,
++    required this.amount,
++    required this.status,
++    required this.initiatedAt,
++    this.completedAt,
++    this.utr,
++    this.failureReason,
++  });
++
++  final String id;
++  final String loanId;
++  final num amount;
++  final DisbursementStatus status;
++  final DateTime initiatedAt;
++  final DateTime? completedAt;
++  final String? utr; // Unique Transaction Reference, once successful
++  final String? failureReason;
++}
++
++// ---------------------------------------------------------------------
++// Repayment schedule (handbook §26) + payments (handbook §24)
++// ---------------------------------------------------------------------
++
++enum InstallmentStatus { upcoming, due, paid, overdue, partiallyPaid }
++
++class RepaymentInstallment {
++  const RepaymentInstallment({
++    required this.installmentNumber,
++    required this.dueDate,
++    required this.principalComponent,
++    required this.interestComponent,
++    required this.amountDue,
++    required this.amountPaid,
++    required this.status,
++    this.daysPastDue = 0,
++  });
++
++  final int installmentNumber;
++  final DateTime dueDate;
++  final num principalComponent;
++  final num interestComponent;
++  final num amountDue;
++  final num amountPaid;
++  final InstallmentStatus status;
++  final int daysPastDue;
++
++  num get amountRemaining => (amountDue - amountPaid).clamp(0, amountDue);
++}
++
++class RepaymentSchedule {
++  const RepaymentSchedule({
++    required this.loanId,
++    required this.installments,
++    required this.generatedAt,
++  });
++
++  final String loanId;
++  final List<RepaymentInstallment> installments;
++  final DateTime generatedAt;
++
++  num get totalOutstanding =>
++      installments.fold<num>(0, (sum, i) => sum + i.amountRemaining);
++
++  RepaymentInstallment? get nextDue {
++    final due = installments.where(
++      (i) => i.status == InstallmentStatus.due || i.status == InstallmentStatus.overdue,
++    );
++    if (due.isEmpty) return null;
++    return due.reduce((a, b) => a.dueDate.isBefore(b.dueDate) ? a : b);
++  }
++
++  bool get isFullyPaid => installments.every((i) => i.status == InstallmentStatus.paid);
++}
++
++enum PaymentMethod { upi, debitCard, netBanking }
++
++enum PaymentStatus { pending, success, failed }
++
++class Payment {
++  const Payment({
++    required this.id,
++    required this.loanId,
++    required this.amount,
++    required this.method,
++    required this.status,
++    required this.createdAt,
++    this.installmentNumbers = const [],
++    this.receiptRef,
++  });
++
++  final String id;
++  final String loanId;
++  final num amount;
++  final PaymentMethod method;
++  final PaymentStatus status;
++  final DateTime createdAt;
++  final List<int> installmentNumbers;
++  final String? receiptRef;
++}
++
++/// The active loan itself — the thing a loan_application becomes once
++/// disbursed. Kept separate from LoanApplication (which is the real,
++/// backend-driven model) since a real backend would model these as
++/// distinct entities too (handbook §34: `loans` vs `loan_applications`).
++class ActiveLoan {
++  const ActiveLoan({
++    required this.id,
++    required this.applicationId,
++    required this.principalAmount,
++    required this.disbursedAt,
++    required this.status,
++  });
++
++  final String id;
++  final String applicationId;
++  final num principalAmount;
++  final DateTime disbursedAt;
++  final String status; // "ACTIVE" | "OVERDUE" | "CLOSED" (handbook §47)
++}
+diff --git a/lib/features/loan_lifecycle/data/mock_loan_lifecycle_repository.dart b/lib/features/loan_lifecycle/data/mock_loan_lifecycle_repository.dart
+new file mode 100644
+index 0000000..0f476d1
+--- /dev/null
++++ b/lib/features/loan_lifecycle/data/mock_loan_lifecycle_repository.dart
+@@ -0,0 +1,446 @@
++import 'dart:math';
++
++import 'loan_lifecycle_models.dart';
++
++/// Everything a screen needs from the post-approval loan lifecycle,
++/// independent of where the data actually comes from. A real
++/// implementation (`HttpLoanLifecycleRepository`) implements this same
++/// interface against your backend once Phase 2 (offers/KFS/agreements/
++/// e-sign/disbursement/repayment) exists — nothing calling this
++/// interface needs to change when that happens.
++abstract class LoanLifecycleRepository {
++  Future<LoanOffer?> getOffer(String applicationId);
++  Future<LoanOffer> acceptOffer(String offerId);
++  Future<void> declineOffer(String offerId);
++
++  Future<KfsDocument> getKfs(String offerId);
++
++  Future<LoanAgreement> getAgreement(String offerId);
++  Future<LoanAgreement> initiateESign(String agreementId);
++  Future<LoanAgreement> completeESign(String agreementId);
++
++  Future<BankAccount?> getBankAccount(String applicationId);
++  Future<BankAccount> submitBankAccount({
++    required String applicationId,
++    required String accountHolderName,
++    required String accountNumber,
++    required String ifsc,
++  });
++
++  Future<Disbursement?> getDisbursement(String applicationId);
++
++  Future<ActiveLoan?> getActiveLoan(String applicationId);
++  Future<RepaymentSchedule> getRepaymentSchedule(String loanId);
++  Future<Payment> makePayment({
++    required String loanId,
++    required num amount,
++    required PaymentMethod method,
++    required List<int> installmentNumbers,
++  });
++  Future<List<Payment>> getPaymentHistory(String loanId);
++}
++
++/// In-memory mock — deterministic, stateful for the lifetime of the app
++/// process (resets on restart; that's expected and fine for a mock).
++///
++/// PRICING DISCLAIMER: the interest rate, fees and APR generated here are
++/// ILLUSTRATIVE PLACEHOLDERS ONLY, deliberately not tied to any real
++/// approved lending policy — per the product handbook's own instruction
++/// not to invent regulatory rates. Every screen using this data shows a
++/// visible "illustrative terms" notice. Replace entirely once a real
++/// pricing/policy engine exists server-side.
++class MockLoanLifecycleRepository implements LoanLifecycleRepository {
++  final Map<String, LoanOffer> _offers = {};
++  final Map<String, KfsDocument> _kfs = {};
++  final Map<String, LoanAgreement> _agreements = {};
++  final Map<String, BankAccount> _bankAccounts = {}; // keyed by applicationId
++  final Map<String, Disbursement> _disbursements = {}; // keyed by applicationId
++  final Map<String, ActiveLoan> _activeLoans = {}; // keyed by applicationId
++  final Map<String, RepaymentSchedule> _schedules = {}; // keyed by loanId
++  final Map<String, List<Payment>> _payments = {}; // keyed by loanId
++
++  Future<void> _simulateLatency([int ms = 500]) =>
++      Future.delayed(Duration(milliseconds: ms));
++
++  // --- Offer -------------------------------------------------------
++
++  @override
++  Future<LoanOffer?> getOffer(String applicationId) async {
++    await _simulateLatency(300);
++    return _offers[applicationId];
++  }
++
++  /// Called by the loan-detail screen once it sees the real application
++  /// status is APPROVED — generates the (illustrative) offer the first
++  /// time it's asked for one.
++  Future<LoanOffer> ensureOfferGenerated({
++    required String applicationId,
++    required num requestedAmount,
++    required int requestedTenureDays,
++  }) async {
++    final existing = _offers[applicationId];
++    if (existing != null) return existing;
++
++    await _simulateLatency(700);
++
++    const annualRatePercent = 24.0; // illustrative placeholder only
++    final processingFee = (requestedAmount * 0.02).roundToDouble();
++    final years = requestedTenureDays / 365;
++    final interest = (requestedAmount * (annualRatePercent / 100) * years);
++    final totalRepayment = requestedAmount + interest;
++    final installments = max(1, (requestedTenureDays / 30).round());
++    final emi = (totalRepayment / installments).roundToDouble();
++    final apr = ((interest + processingFee) / requestedAmount / years) * 100;
++
++    final offer = LoanOffer(
++      id: 'offer_${applicationId}_1',
++      applicationId: applicationId,
++      approvedAmount: requestedAmount,
++      disbursableAmount: requestedAmount - processingFee,
++      tenureDays: requestedTenureDays,
++      annualInterestRatePercent: annualRatePercent,
++      processingFee: processingFee,
++      otherCharges: 0,
++      apr: apr,
++      totalRepaymentAmount: totalRepayment.roundToDouble(),
++      emiAmount: emi,
++      issuedAt: DateTime.now(),
++      expiresAt: DateTime.now().add(const Duration(days: 3)),
++      version: 1,
++      status: OfferStatus.issued,
++      lenderName: 'InPockets Financial Services',
++    );
++
++    _offers[applicationId] = offer;
++    return offer;
++  }
++
++  @override
++  Future<LoanOffer> acceptOffer(String offerId) async {
++    await _simulateLatency();
++    final entry = _offers.entries.firstWhere((e) => e.value.id == offerId);
++    final updated = _copyOfferWithStatus(entry.value, OfferStatus.accepted);
++    _offers[entry.key] = updated;
++    return updated;
++  }
++
++  @override
++  Future<void> declineOffer(String offerId) async {
++    await _simulateLatency();
++    final entry = _offers.entries.firstWhere((e) => e.value.id == offerId);
++    _offers[entry.key] = _copyOfferWithStatus(entry.value, OfferStatus.declined);
++  }
++
++  LoanOffer _copyOfferWithStatus(LoanOffer o, OfferStatus status) => LoanOffer(
++        id: o.id,
++        applicationId: o.applicationId,
++        approvedAmount: o.approvedAmount,
++        disbursableAmount: o.disbursableAmount,
++        tenureDays: o.tenureDays,
++        annualInterestRatePercent: o.annualInterestRatePercent,
++        processingFee: o.processingFee,
++        otherCharges: o.otherCharges,
++        apr: o.apr,
++        totalRepaymentAmount: o.totalRepaymentAmount,
++        emiAmount: o.emiAmount,
++        issuedAt: o.issuedAt,
++        expiresAt: o.expiresAt,
++        version: o.version,
++        status: status,
++        lenderName: o.lenderName,
++      );
++
++  // --- KFS -----------------------------------------------------------
++
++  @override
++  Future<KfsDocument> getKfs(String offerId) async {
++    await _simulateLatency(400);
++    final cached = _kfs[offerId];
++    if (cached != null) return cached;
++
++    final offer = _offers.values.firstWhere((o) => o.id == offerId);
++    final doc = KfsDocument(
++      id: 'kfs_$offerId',
++      offerId: offerId,
++      version: 1,
++      generatedAt: DateTime.now(),
++      lineItems: [
++        KfsLineItem(label: 'Loan amount', value: '₹${offer.approvedAmount}'),
++        KfsLineItem(
++          label: 'Annual interest rate',
++          value: '${offer.annualInterestRatePercent.toStringAsFixed(1)}%',
++        ),
++        KfsLineItem(label: 'Processing fee', value: '₹${offer.processingFee}'),
++        KfsLineItem(label: 'APR (all-in cost)', value: '${offer.apr.toStringAsFixed(1)}%'),
++        KfsLineItem(
++          label: 'Total amount repayable',
++          value: '₹${offer.totalRepaymentAmount}',
++        ),
++        KfsLineItem(label: 'Tenure', value: '${offer.tenureDays} days'),
++        KfsLineItem(label: 'Lender', value: offer.lenderName),
++      ],
++    );
++    _kfs[offerId] = doc;
++    return doc;
++  }
++
++  // --- Agreement / e-Sign --------------------------------------------
++
++  @override
++  Future<LoanAgreement> getAgreement(String offerId) async {
++    await _simulateLatency(400);
++    final cached = _agreements[offerId];
++    if (cached != null) return cached;
++
++    final agreement = LoanAgreement(
++      id: 'agreement_$offerId',
++      offerId: offerId,
++      version: 1,
++      createdAt: DateTime.now(),
++      signingStatus: ESignStatus.initiated,
++    );
++    _agreements[offerId] = agreement;
++    return agreement;
++  }
++
++  @override
++  Future<LoanAgreement> initiateESign(String agreementId) async {
++    await _simulateLatency(500);
++    final entry = _agreements.entries.firstWhere((e) => e.value.id == agreementId);
++    final updated = LoanAgreement(
++      id: entry.value.id,
++      offerId: entry.value.offerId,
++      version: entry.value.version,
++      createdAt: entry.value.createdAt,
++      signingStatus: ESignStatus.pending,
++      providerRef: 'mock-esign-${DateTime.now().millisecondsSinceEpoch}',
++    );
++    _agreements[entry.key] = updated;
++    return updated;
++  }
++
++  @override
++  Future<LoanAgreement> completeESign(String agreementId) async {
++    await _simulateLatency(900);
++    final entry = _agreements.entries.firstWhere((e) => e.value.id == agreementId);
++    final updated = LoanAgreement(
++      id: entry.value.id,
++      offerId: entry.value.offerId,
++      version: entry.value.version,
++      createdAt: entry.value.createdAt,
++      signingStatus: ESignStatus.signed,
++      signedAt: DateTime.now(),
++      providerRef: entry.value.providerRef,
++    );
++    _agreements[entry.key] = updated;
++    return updated;
++  }
++
++  // --- Bank account ----------------------------------------------------
++
++  @override
++  Future<BankAccount?> getBankAccount(String applicationId) async {
++    await _simulateLatency(300);
++    return _bankAccounts[applicationId];
++  }
++
++  @override
++  Future<BankAccount> submitBankAccount({
++    required String applicationId,
++    required String accountHolderName,
++    required String accountNumber,
++    required String ifsc,
++  }) async {
++    await _simulateLatency(1200); // simulates a penny-drop verification call
++
++    final masked = accountNumber.length > 4
++        ? '•' * (accountNumber.length - 4) + accountNumber.substring(accountNumber.length - 4)
++        : accountNumber;
++
++    final account = BankAccount(
++      id: 'bank_$applicationId',
++      accountHolderName: accountHolderName,
++      accountNumberMasked: masked,
++      ifsc: ifsc.toUpperCase(),
++      bankName: _guessBankFromIfsc(ifsc),
++      status: BankVerificationStatus.verified,
++    );
++    _bankAccounts[applicationId] = account;
++    return account;
++  }
++
++  String _guessBankFromIfsc(String ifsc) {
++    if (ifsc.length < 4) return 'Bank';
++    final code = ifsc.substring(0, 4).toUpperCase();
++    const known = {
++      'HDFC': 'HDFC Bank',
++      'ICIC': 'ICICI Bank',
++      'SBIN': 'State Bank of India',
++      'UTIB': 'Axis Bank',
++      'PUNB': 'Punjab National Bank',
++      'KKBK': 'Kotak Mahindra Bank',
++    };
++    return known[code] ?? 'Bank ($code)';
++  }
++
++  // --- Disbursement ------------------------------------------------
++
++  @override
++  Future<Disbursement?> getDisbursement(String applicationId) async {
++    await _simulateLatency(300);
++    return _disbursements[applicationId];
++  }
++
++  /// Kicks off the mock disbursement: starts PROCESSING immediately,
++  /// then resolves to SUCCESS a couple of seconds later — the screen
++  /// polls getDisbursement() to observe this transition, exactly like it
++  /// would against a real async payout provider.
++  Future<Disbursement> initiateDisbursement({
++    required String applicationId,
++    required num amount,
++  }) async {
++    final loanId = 'loan_$applicationId';
++    final processing = Disbursement(
++      id: 'disb_$applicationId',
++      loanId: loanId,
++      amount: amount,
++      status: DisbursementStatus.processing,
++      initiatedAt: DateTime.now(),
++    );
++    _disbursements[applicationId] = processing;
++
++    unawaited(_resolveDisbursementLater(applicationId, loanId, amount));
++
++    return processing;
++  }
++
++  Future<void> _resolveDisbursementLater(
++    String applicationId,
++    String loanId,
++    num amount,
++  ) async {
++    await Future.delayed(const Duration(seconds: 3));
++    final success = Disbursement(
++      id: 'disb_$applicationId',
++      loanId: loanId,
++      amount: amount,
++      status: DisbursementStatus.success,
++      initiatedAt: _disbursements[applicationId]!.initiatedAt,
++      completedAt: DateTime.now(),
++      utr: 'UTR${DateTime.now().millisecondsSinceEpoch}',
++    );
++    _disbursements[applicationId] = success;
++
++    _activeLoans[applicationId] = ActiveLoan(
++      id: loanId,
++      applicationId: applicationId,
++      principalAmount: amount,
++      disbursedAt: DateTime.now(),
++      status: 'ACTIVE',
++    );
++
++    _schedules[loanId] = _generateSchedule(loanId, applicationId);
++  }
++
++  // --- Active loan / repayment --------------------------------------
++
++  @override
++  Future<ActiveLoan?> getActiveLoan(String applicationId) async {
++    await _simulateLatency(300);
++    return _activeLoans[applicationId];
++  }
++
++  RepaymentSchedule _generateSchedule(String loanId, String applicationId) {
++    final offer = _offers[applicationId]!;
++    final installmentCount = max(1, (offer.tenureDays / 30).round());
++    final perInstallmentPrincipal = offer.approvedAmount / installmentCount;
++    final perInstallmentInterest =
++        (offer.totalRepaymentAmount - offer.approvedAmount) / installmentCount;
++    final now = DateTime.now();
++
++    final installments = List.generate(installmentCount, (i) {
++      final dueDate = DateTime(now.year, now.month + i + 1, now.day);
++      return RepaymentInstallment(
++        installmentNumber: i + 1,
++        dueDate: dueDate,
++        principalComponent: perInstallmentPrincipal.roundToDouble(),
++        interestComponent: perInstallmentInterest.roundToDouble(),
++        amountDue: offer.emiAmount,
++        amountPaid: 0,
++        status: i == 0 ? InstallmentStatus.due : InstallmentStatus.upcoming,
++      );
++    });
++
++    return RepaymentSchedule(
++      loanId: loanId,
++      installments: installments,
++      generatedAt: now,
++    );
++  }
++
++  @override
++  Future<RepaymentSchedule> getRepaymentSchedule(String loanId) async {
++    await _simulateLatency(400);
++    final schedule = _schedules[loanId];
++    if (schedule == null) {
++      throw StateError('No repayment schedule for loan $loanId yet');
++    }
++    return schedule;
++  }
++
++  @override
++  Future<Payment> makePayment({
++    required String loanId,
++    required num amount,
++    required PaymentMethod method,
++    required List<int> installmentNumbers,
++  }) async {
++    await _simulateLatency(1500); // simulates a real payment round trip
++
++    final payment = Payment(
++      id: 'pay_${DateTime.now().millisecondsSinceEpoch}',
++      loanId: loanId,
++      amount: amount,
++      method: method,
++      status: PaymentStatus.success,
++      createdAt: DateTime.now(),
++      installmentNumbers: installmentNumbers,
++      receiptRef: 'RCPT${DateTime.now().millisecondsSinceEpoch}',
++    );
++
++    _payments.putIfAbsent(loanId, () => []).insert(0, payment);
++
++    final schedule = _schedules[loanId];
++    if (schedule != null) {
++      final updatedInstallments = schedule.installments.map((inst) {
++        if (!installmentNumbers.contains(inst.installmentNumber)) return inst;
++        return RepaymentInstallment(
++          installmentNumber: inst.installmentNumber,
++          dueDate: inst.dueDate,
++          principalComponent: inst.principalComponent,
++          interestComponent: inst.interestComponent,
++          amountDue: inst.amountDue,
++          amountPaid: inst.amountDue,
++          status: InstallmentStatus.paid,
++        );
++      }).toList();
++
++      _schedules[loanId] = RepaymentSchedule(
++        loanId: loanId,
++        installments: updatedInstallments,
++        generatedAt: schedule.generatedAt,
++      );
++    }
++
++    return payment;
++  }
++
++  @override
++  Future<List<Payment>> getPaymentHistory(String loanId) async {
++    await _simulateLatency(300);
++    return List.unmodifiable(_payments[loanId] ?? const []);
++  }
++}
++
++// Small helper so `unawaited` reads clearly without pulling in `package:pedantic`.
++void unawaited(Future<void> future) {}
+diff --git a/lib/features/loan_lifecycle/presentation/agreement_esign_screen.dart b/lib/features/loan_lifecycle/presentation/agreement_esign_screen.dart
+new file mode 100644
+index 0000000..c634344
+--- /dev/null
++++ b/lib/features/loan_lifecycle/presentation/agreement_esign_screen.dart
+@@ -0,0 +1,158 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:go_router/go_router.dart';
++
++import '../../../core/theme/app_theme.dart';
++import '../../../core/utils/formatters.dart';
++import '../../../core/widgets/buttons.dart';
++import '../../../core/widgets/feedback.dart';
++import '../../../core/widgets/motion_widgets.dart';
++import '../application/loan_journey_controller.dart';
++import '../data/loan_lifecycle_models.dart';
++
++class AgreementESignScreen extends ConsumerStatefulWidget {
++  const AgreementESignScreen({super.key, required this.applicationId});
++
++  final String applicationId;
++
++  @override
++  ConsumerState<AgreementESignScreen> createState() => _AgreementESignScreenState();
++}
++
++class _AgreementESignScreenState extends ConsumerState<AgreementESignScreen> {
++  bool _agreed = false;
++  bool _isSigning = false;
++
++  Future<void> _sign() async {
++    setState(() => _isSigning = true);
++    final notifier = ref.read(loanJourneyControllerProvider(widget.applicationId).notifier);
++    await notifier.initiateESign();
++    await notifier.completeESign();
++    if (mounted) setState(() => _isSigning = false);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final snapshotAsync = ref.watch(loanJourneyControllerProvider(widget.applicationId));
++
++    return Scaffold(
++      appBar: AppBar(title: const Text('Loan agreement')),
++      body: snapshotAsync.when(
++        loading: () => const Center(child: CircularProgressIndicator()),
++        error: (e, _) => Center(child: Text('$e')),
++        data: (snapshot) {
++          final agreement = snapshot.agreement;
++          final offer = snapshot.offer;
++          if (agreement == null || offer == null) {
++            return const Center(child: CircularProgressIndicator());
++          }
++
++          if (agreement.signingStatus == ESignStatus.signed) {
++            return Padding(
++              padding: const EdgeInsets.all(AppSpacing.lg),
++              child: Column(
++                mainAxisAlignment: MainAxisAlignment.center,
++                children: [
++                  const SuccessCheckAnimation(size: 96),
++                  const SizedBox(height: AppSpacing.lg),
++                  Text('Agreement signed', style: theme.textTheme.headlineMedium),
++                  const SizedBox(height: AppSpacing.xs),
++                  Text(
++                    'Signed on ${AppFormatters.dateTime(agreement.signedAt!)}',
++                    style: theme.textTheme.bodyMedium,
++                  ),
++                  const SizedBox(height: AppSpacing.xl),
++                  PrimaryButton(
++                    label: 'Continue to bank verification',
++                    onPressed: () => context.push('/loans/${widget.applicationId}/bank-account'),
++                  ),
++                ],
++              ),
++            );
++          }
++
++          return SingleChildScrollView(
++            padding: const EdgeInsets.all(AppSpacing.lg),
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                FadeSlideIn(
++                  child: Card(
++                    child: Padding(
++                      padding: const EdgeInsets.all(AppSpacing.lg),
++                      child: Column(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Row(
++                            children: [
++                              Icon(Icons.description_rounded, color: theme.colorScheme.primary),
++                              const SizedBox(width: AppSpacing.sm),
++                              Text('Loan Agreement v${agreement.version}', style: theme.textTheme.titleLarge),
++                            ],
++                          ),
++                          const SizedBox(height: AppSpacing.md),
++                          _SummaryLine('Principal', AppFormatters.currency(offer.approvedAmount)),
++                          _SummaryLine('Tenure', AppFormatters.tenureDays(offer.tenureDays)),
++                          _SummaryLine('Interest rate', '${offer.annualInterestRatePercent.toStringAsFixed(1)}% p.a.'),
++                          _SummaryLine('Monthly EMI', AppFormatters.currency(offer.emiAmount)),
++                          const SizedBox(height: AppSpacing.md),
++                          Text(
++                            'By signing, you agree to repay the loan according to the '
++                            'schedule shown in your Key Facts Statement.',
++                            style: theme.textTheme.bodySmall,
++                          ),
++                        ],
++                      ),
++                    ),
++                  ),
++                ),
++                const SizedBox(height: AppSpacing.lg),
++                FadeSlideIn(
++                  delay: const Duration(milliseconds: 80),
++                  child: CheckboxListTile(
++                    value: _agreed,
++                    onChanged: _isSigning ? null : (v) => setState(() => _agreed = v ?? false),
++                    controlAffinity: ListTileControlAffinity.leading,
++                    contentPadding: EdgeInsets.zero,
++                    title: Text(
++                      'I have read and agree to the loan agreement.',
++                      style: theme.textTheme.bodyMedium,
++                    ),
++                  ),
++                ),
++                const SizedBox(height: AppSpacing.lg),
++                PrimaryButton(
++                  label: _isSigning ? 'Signing…' : 'Sign agreement',
++                  isLoading: _isSigning,
++                  onPressed: _agreed ? _sign : null,
++                ),
++              ],
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++class _SummaryLine extends StatelessWidget {
++  const _SummaryLine(this.label, this.value);
++  final String label;
++  final String value;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 3),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: theme.textTheme.bodySmall),
++          Text(value, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/loan_lifecycle/presentation/bank_verification_screen.dart b/lib/features/loan_lifecycle/presentation/bank_verification_screen.dart
+new file mode 100644
+index 0000000..dba2a06
+--- /dev/null
++++ b/lib/features/loan_lifecycle/presentation/bank_verification_screen.dart
+@@ -0,0 +1,191 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:go_router/go_router.dart';
++
++import '../../../core/theme/app_theme.dart';
++import '../../../core/widgets/buttons.dart';
++import '../../../core/widgets/feedback.dart';
++import '../../../core/widgets/inputs.dart';
++import '../../../core/widgets/motion_widgets.dart';
++import '../application/loan_journey_controller.dart';
++import '../data/loan_lifecycle_models.dart';
++
++final _ifscPattern = RegExp(r'^[A-Z]{4}0[A-Z0-9]{6}$');
++
++class BankVerificationScreen extends ConsumerStatefulWidget {
++  const BankVerificationScreen({super.key, required this.applicationId});
++
++  final String applicationId;
++
++  @override
++  ConsumerState<BankVerificationScreen> createState() => _BankVerificationScreenState();
++}
++
++class _BankVerificationScreenState extends ConsumerState<BankVerificationScreen> {
++  final _nameController = TextEditingController();
++  final _accountController = TextEditingController();
++  final _confirmAccountController = TextEditingController();
++  final _ifscController = TextEditingController();
++  bool _isSubmitting = false;
++  String? _error;
++
++  @override
++  void dispose() {
++    _nameController.dispose();
++    _accountController.dispose();
++    _confirmAccountController.dispose();
++    _ifscController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _submit() async {
++    if (_nameController.text.trim().isEmpty) {
++      setState(() => _error = 'Enter the account holder name');
++      return;
++    }
++    if (_accountController.text.trim().length < 6) {
++      setState(() => _error = 'Enter a valid account number');
++      return;
++    }
++    if (_accountController.text.trim() != _confirmAccountController.text.trim()) {
++      setState(() => _error = 'Account numbers do not match');
++      return;
++    }
++    if (!_ifscPattern.hasMatch(_ifscController.text.trim().toUpperCase())) {
++      setState(() => _error = 'Enter a valid IFSC code (e.g. HDFC0001234)');
++      return;
++    }
++
++    setState(() {
++      _error = null;
++      _isSubmitting = true;
++    });
++
++    await ref.read(loanJourneyControllerProvider(widget.applicationId).notifier).submitBankAccount(
++          accountHolderName: _nameController.text.trim(),
++          accountNumber: _accountController.text.trim(),
++          ifsc: _ifscController.text.trim(),
++        );
++
++    if (mounted) setState(() => _isSubmitting = false);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final snapshotAsync = ref.watch(loanJourneyControllerProvider(widget.applicationId));
++
++    return Scaffold(
++      appBar: AppBar(title: const Text('Bank account')),
++      body: snapshotAsync.when(
++        loading: () => const Center(child: CircularProgressIndicator()),
++        error: (e, _) => Center(child: Text('$e')),
++        data: (snapshot) {
++          final account = snapshot.bankAccount;
++
++          if (account != null && account.status == BankVerificationStatus.verified) {
++            return Padding(
++              padding: const EdgeInsets.all(AppSpacing.lg),
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  FadeSlideIn(
++                    child: Card(
++                      child: Padding(
++                        padding: const EdgeInsets.all(AppSpacing.lg),
++                        child: Column(
++                          crossAxisAlignment: CrossAxisAlignment.start,
++                          children: [
++                            Row(
++                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                              children: [
++                                Row(
++                                  children: [
++                                    const Icon(Icons.account_balance_rounded, color: AppColors.success),
++                                    const SizedBox(width: AppSpacing.sm),
++                                    Text(account.bankName, style: theme.textTheme.titleLarge),
++                                  ],
++                                ),
++                                const StatusChip(label: 'Verified', tone: StatusTone.success),
++                              ],
++                            ),
++                            const SizedBox(height: AppSpacing.md),
++                            Text(account.accountHolderName, style: theme.textTheme.bodyLarge),
++                            Text(account.accountNumberMasked, style: theme.textTheme.bodyMedium),
++                            Text(account.ifsc, style: theme.textTheme.bodySmall),
++                          ],
++                        ),
++                      ),
++                    ),
++                  ),
++                  const SizedBox(height: AppSpacing.xl),
++                  PrimaryButton(
++                    label: 'Continue to disbursement',
++                    onPressed: () => context.push('/loans/${widget.applicationId}/disbursement'),
++                  ),
++                ],
++              ),
++            );
++          }
++
++          return SingleChildScrollView(
++            padding: const EdgeInsets.all(AppSpacing.lg),
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(
++                  "We'll verify this account with a small (instantly reversed) "
++                  'deposit before disbursing your loan.',
++                  style: theme.textTheme.bodyMedium,
++                ),
++                const SizedBox(height: AppSpacing.lg),
++                AppTextField(
++                  label: 'Account holder name',
++                  controller: _nameController,
++                  textCapitalization: TextCapitalization.words,
++                ),
++                const SizedBox(height: AppSpacing.md),
++                AppTextField(
++                  label: 'Account number',
++                  controller: _accountController,
++                  keyboardType: TextInputType.number,
++                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
++                ),
++                const SizedBox(height: AppSpacing.md),
++                AppTextField(
++                  label: 'Confirm account number',
++                  controller: _confirmAccountController,
++                  keyboardType: TextInputType.number,
++                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
++                ),
++                const SizedBox(height: AppSpacing.md),
++                AppTextField(
++                  label: 'IFSC code',
++                  controller: _ifscController,
++                  hint: 'HDFC0001234',
++                  textCapitalization: TextCapitalization.characters,
++                  inputFormatters: [
++                    TextInputFormatter.withFunction(
++                      (oldValue, newValue) => newValue.copyWith(text: newValue.text.toUpperCase()),
++                    ),
++                  ],
++                ),
++                if (_error != null) ...[
++                  const SizedBox(height: AppSpacing.sm),
++                  Text(_error!, style: theme.textTheme.bodySmall?.copyWith(color: AppColors.danger)),
++                ],
++                const SizedBox(height: AppSpacing.xl),
++                PrimaryButton(
++                  label: _isSubmitting ? 'Verifying…' : 'Verify account',
++                  isLoading: _isSubmitting,
++                  onPressed: _submit,
++                ),
++              ],
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
+diff --git a/lib/features/loan_lifecycle/presentation/disbursement_status_screen.dart b/lib/features/loan_lifecycle/presentation/disbursement_status_screen.dart
+new file mode 100644
+index 0000000..d5f4032
+--- /dev/null
++++ b/lib/features/loan_lifecycle/presentation/disbursement_status_screen.dart
+@@ -0,0 +1,147 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:go_router/go_router.dart';
++
++import '../../../core/router/route_paths.dart';
++import '../../../core/theme/app_theme.dart';
++import '../../../core/utils/formatters.dart';
++import '../../../core/widgets/buttons.dart';
++import '../../../core/widgets/feedback.dart';
++import '../../../core/widgets/motion_widgets.dart';
++import '../application/loan_journey_controller.dart';
++import '../data/loan_lifecycle_models.dart';
++
++class DisbursementStatusScreen extends ConsumerStatefulWidget {
++  const DisbursementStatusScreen({super.key, required this.applicationId});
++
++  final String applicationId;
++
++  @override
++  ConsumerState<DisbursementStatusScreen> createState() => _DisbursementStatusScreenState();
++}
++
++class _DisbursementStatusScreenState extends ConsumerState<DisbursementStatusScreen> {
++  Timer? _pollTimer;
++  bool _initiated = false;
++
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addPostFrameCallback((_) => _ensureInitiated());
++  }
++
++  @override
++  void dispose() {
++    _pollTimer?.cancel();
++    super.dispose();
++  }
++
++  Future<void> _ensureInitiated() async {
++    if (_initiated) return;
++    _initiated = true;
++    final snapshot = ref.read(loanJourneyControllerProvider(widget.applicationId)).value;
++    if (snapshot?.disbursement == null) {
++      await ref
++          .read(loanJourneyControllerProvider(widget.applicationId).notifier)
++          .initiateDisbursement();
++    }
++  }
++
++  void _ensurePolling(DisbursementStatus status) {
++    final shouldPoll = status == DisbursementStatus.processing || status == DisbursementStatus.pending;
++    if (shouldPoll && _pollTimer == null) {
++      _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) {
++        ref.read(loanJourneyControllerProvider(widget.applicationId).notifier).refreshQuietly();
++      });
++    } else if (!shouldPoll && _pollTimer != null) {
++      _pollTimer?.cancel();
++      _pollTimer = null;
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final snapshotAsync = ref.watch(loanJourneyControllerProvider(widget.applicationId));
++
++    return Scaffold(
++      appBar: AppBar(title: const Text('Disbursement')),
++      body: snapshotAsync.when(
++        loading: () => const Center(child: CircularProgressIndicator()),
++        error: (e, _) => Center(child: Text('$e')),
++        data: (snapshot) {
++          final disbursement = snapshot.disbursement;
++          if (disbursement == null) {
++            return const Center(child: CircularProgressIndicator());
++          }
++
++          _ensurePolling(disbursement.status);
++
++          return Padding(
++            padding: const EdgeInsets.all(AppSpacing.lg),
++            child: Center(
++              child: Column(
++                mainAxisAlignment: MainAxisAlignment.center,
++                children: disbursement.status == DisbursementStatus.success
++                    ? _successContent(theme, disbursement)
++                    : _processingContent(theme, disbursement),
++              ),
++            ),
++          );
++        },
++      ),
++    );
++  }
++
++  List<Widget> _processingContent(ThemeData theme, Disbursement disbursement) {
++    return [
++      SizedBox(
++        width: 72,
++        height: 72,
++        child: CircularProgressIndicator(strokeWidth: 3, color: theme.colorScheme.primary),
++      ),
++      const SizedBox(height: AppSpacing.lg),
++      Text('Sending your money', style: theme.textTheme.headlineMedium),
++      const SizedBox(height: AppSpacing.xs),
++      Text(
++        AppFormatters.currency(disbursement.amount),
++        style: theme.textTheme.bodyMedium,
++      ),
++      const SizedBox(height: AppSpacing.sm),
++      Text(
++        'This usually takes a few seconds.',
++        style: theme.textTheme.bodySmall,
++        textAlign: TextAlign.center,
++      ),
++    ];
++  }
++
++  List<Widget> _successContent(ThemeData theme, Disbursement disbursement) {
++    return [
++      const SuccessCheckAnimation(size: 100),
++      const SizedBox(height: AppSpacing.lg),
++      Text('Money sent!', style: theme.textTheme.displayMedium),
++      const SizedBox(height: AppSpacing.xs),
++      Text(
++        AppFormatters.currency(disbursement.amount),
++        style: theme.textTheme.headlineMedium?.copyWith(color: AppColors.success),
++      ),
++      const SizedBox(height: AppSpacing.sm),
++      if (disbursement.utr != null)
++        Text('Reference: ${disbursement.utr}', style: theme.textTheme.bodySmall),
++      const SizedBox(height: AppSpacing.xl),
++      PrimaryButton(
++        label: 'View repayment schedule',
++        fullWidth: false,
++        onPressed: () => context.go('/loans/${widget.applicationId}/repayment'),
++      ),
++      const SizedBox(height: AppSpacing.sm),
++      TextLinkButton(
++        label: 'Back to dashboard',
++        onPressed: () => context.go(RoutePaths.home),
++      ),
++    ];
++  }
++}
+diff --git a/lib/features/loan_lifecycle/presentation/illustrative_terms_banner.dart b/lib/features/loan_lifecycle/presentation/illustrative_terms_banner.dart
+new file mode 100644
+index 0000000..4e1a94f
+--- /dev/null
++++ b/lib/features/loan_lifecycle/presentation/illustrative_terms_banner.dart
+@@ -0,0 +1,36 @@
++import 'package:flutter/material.dart';
++
++import '../../../core/theme/app_theme.dart';
++
++/// Shown on every screen that displays mock pricing — required reading
++/// before this app can be mistaken for quoting real, compliant loan
++/// terms. Remove only once a real pricing/policy engine backs this data.
++class IllustrativeTermsBanner extends StatelessWidget {
++  const IllustrativeTermsBanner({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(
++        color: AppColors.warningBg,
++        borderRadius: BorderRadius.circular(AppSpacing.radiusMd),
++      ),
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          const Icon(Icons.info_outline_rounded, size: 18, color: AppColors.warning),
++          const SizedBox(width: AppSpacing.sm),
++          Expanded(
++            child: Text(
++              'Illustrative terms — final pricing is confirmed by our '
++              'lending policy engine, not shown here yet.',
++              style: theme.textTheme.bodySmall?.copyWith(color: AppColors.warning),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/loan_lifecycle/presentation/kfs_screen.dart b/lib/features/loan_lifecycle/presentation/kfs_screen.dart
+new file mode 100644
+index 0000000..5da8534
+--- /dev/null
++++ b/lib/features/loan_lifecycle/presentation/kfs_screen.dart
+@@ -0,0 +1,90 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/theme/app_theme.dart';
++import '../../../core/widgets/feedback.dart';
++import '../application/loan_journey_controller.dart';
++import '../data/loan_lifecycle_models.dart';
++import 'illustrative_terms_banner.dart';
++
++class KfsScreen extends ConsumerStatefulWidget {
++  const KfsScreen({super.key, required this.offer});
++
++  final LoanOffer offer;
++
++  @override
++  ConsumerState<KfsScreen> createState() => _KfsScreenState();
++}
++
++class _KfsScreenState extends ConsumerState<KfsScreen> {
++  late final Future<KfsDocument> _kfsFuture =
++      ref.read(loanLifecycleRepositoryProvider).getKfs(widget.offer.id);
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++
++    return Scaffold(
++      appBar: AppBar(title: const Text('Key Facts Statement')),
++      body: FutureBuilder<KfsDocument>(
++        future: _kfsFuture,
++        builder: (context, snapshot) {
++          if (!snapshot.hasData) {
++            return ListView(
++              padding: const EdgeInsets.all(AppSpacing.lg),
++              children: const [
++                ShimmerBox(height: 240, borderRadius: AppSpacing.radiusLg),
++              ],
++            );
++          }
++
++          final kfs = snapshot.data!;
++          return ListView(
++            padding: const EdgeInsets.all(AppSpacing.lg),
++            children: [
++              const IllustrativeTermsBanner(),
++              const SizedBox(height: AppSpacing.lg),
++              Card(
++                child: Padding(
++                  padding: const EdgeInsets.all(AppSpacing.lg),
++                  child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Text('Version ${kfs.version}', style: theme.textTheme.labelMedium),
++                      const SizedBox(height: AppSpacing.md),
++                      ...kfs.lineItems.map(
++                        (item) => Padding(
++                          padding: const EdgeInsets.symmetric(vertical: 8),
++                          child: Row(
++                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                            children: [
++                              Expanded(
++                                child: Text(item.label, style: theme.textTheme.bodyMedium),
++                              ),
++                              Text(
++                                item.value,
++                                style: theme.textTheme.bodyMedium?.copyWith(
++                                  fontWeight: FontWeight.w700,
++                                ),
++                              ),
++                            ],
++                          ),
++                        ),
++                      ),
++                    ],
++                  ),
++                ),
++              ),
++              const SizedBox(height: AppSpacing.md),
++              Text(
++                'This Key Facts Statement is generated from the offer terms shown '
++                'to you and does not change after issuance.',
++                style: theme.textTheme.bodySmall,
++              ),
++            ],
++          );
++        },
++      ),
++    );
++  }
++}
+diff --git a/lib/features/loan_lifecycle/presentation/loan_offer_screen.dart b/lib/features/loan_lifecycle/presentation/loan_offer_screen.dart
+new file mode 100644
+index 0000000..ea38553
+--- /dev/null
++++ b/lib/features/loan_lifecycle/presentation/loan_offer_screen.dart
+@@ -0,0 +1,226 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:go_router/go_router.dart';
++
++import '../../../core/theme/app_theme.dart';
++import '../../../core/utils/formatters.dart';
++import '../../../core/widgets/buttons.dart';
++import '../../../core/widgets/feedback.dart';
++import '../../../core/widgets/motion_widgets.dart';
++import '../application/loan_journey_controller.dart';
++import '../data/loan_lifecycle_models.dart';
++import 'illustrative_terms_banner.dart';
++
++class LoanOfferScreen extends ConsumerStatefulWidget {
++  const LoanOfferScreen({
++    super.key,
++    required this.applicationId,
++    required this.requestedAmount,
++    required this.requestedTenureDays,
++  });
++
++  final String applicationId;
++  final num requestedAmount;
++  final int requestedTenureDays;
++
++  @override
++  ConsumerState<LoanOfferScreen> createState() => _LoanOfferScreenState();
++}
++
++class _LoanOfferScreenState extends ConsumerState<LoanOfferScreen> {
++  bool _isActing = false;
++
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addPostFrameCallback((_) => _ensureOffer());
++  }
++
++  Future<void> _ensureOffer() async {
++    final notifier = ref.read(loanJourneyControllerProvider(widget.applicationId).notifier);
++    await notifier.generateOfferIfNeeded(
++      requestedAmount: widget.requestedAmount,
++      requestedTenureDays: widget.requestedTenureDays,
++    );
++  }
++
++  Future<void> _accept() async {
++    setState(() => _isActing = true);
++    await ref
++        .read(loanJourneyControllerProvider(widget.applicationId).notifier)
++        .acceptOffer();
++    setState(() => _isActing = false);
++    if (mounted) {
++      showAppSnackbar(context, 'Offer accepted', type: ToastType.success);
++    }
++  }
++
++  Future<void> _decline() async {
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (context) => AlertDialog(
++        title: const Text('Decline this offer?'),
++        content: const Text("You can't undo this. You'd need to apply again."),
++        actions: [
++          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
++          TextButton(
++            onPressed: () => Navigator.pop(context, true),
++            child: const Text('Decline', style: TextStyle(color: AppColors.danger)),
++          ),
++        ],
++      ),
++    );
++    if (confirmed != true) return;
++
++    final offer = ref.read(loanJourneyControllerProvider(widget.applicationId)).value?.offer;
++    if (offer == null) return;
++    setState(() => _isActing = true);
++    await ref.read(loanLifecycleRepositoryProvider).declineOffer(offer.id);
++    await ref.read(loanJourneyControllerProvider(widget.applicationId).notifier).load();
++    setState(() => _isActing = false);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final snapshotAsync = ref.watch(loanJourneyControllerProvider(widget.applicationId));
++
++    return Scaffold(
++      appBar: AppBar(title: const Text('Your loan offer')),
++      body: snapshotAsync.when(
++        loading: () => const Center(child: CircularProgressIndicator()),
++        error: (e, _) => Center(child: Text('Something went wrong: $e')),
++        data: (snapshot) {
++          final offer = snapshot.offer;
++          if (offer == null) {
++            return const Center(child: CircularProgressIndicator());
++          }
++
++          return SingleChildScrollView(
++            padding: const EdgeInsets.all(AppSpacing.lg),
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                const IllustrativeTermsBanner(),
++                const SizedBox(height: AppSpacing.lg),
++                FadeSlideIn(
++                  child: Card(
++                    child: Padding(
++                      padding: const EdgeInsets.all(AppSpacing.lg),
++                      child: Column(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Row(
++                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                            children: [
++                              Text('Approved amount', style: theme.textTheme.bodyMedium),
++                              _OfferStatusChip(status: offer.status),
++                            ],
++                          ),
++                          Text(
++                            AppFormatters.currency(offer.approvedAmount),
++                            style: theme.textTheme.displayLarge,
++                          ),
++                          const SizedBox(height: AppSpacing.md),
++                          _Row('Disbursable amount', AppFormatters.currency(offer.disbursableAmount)),
++                          _Row('Tenure', AppFormatters.tenureDays(offer.tenureDays)),
++                          _Row('Interest rate', '${offer.annualInterestRatePercent.toStringAsFixed(1)}% p.a.'),
++                          _Row('Processing fee', AppFormatters.currency(offer.processingFee)),
++                          _Row('APR', '${offer.apr.toStringAsFixed(1)}%'),
++                          const Divider(height: AppSpacing.xl),
++                          _Row('Approx. monthly EMI', AppFormatters.currency(offer.emiAmount), emphasize: true),
++                          _Row('Total repayable', AppFormatters.currency(offer.totalRepaymentAmount), emphasize: true),
++                          const SizedBox(height: AppSpacing.sm),
++                          Text(
++                            offer.isExpired
++                                ? 'This offer has expired.'
++                                : 'Offer valid until ${AppFormatters.dateTime(offer.expiresAt)}',
++                            style: theme.textTheme.bodySmall?.copyWith(
++                              color: offer.isExpired ? AppColors.danger : null,
++                            ),
++                          ),
++                        ],
++                      ),
++                    ),
++                  ),
++                ),
++                const SizedBox(height: AppSpacing.md),
++                FadeSlideIn(
++                  delay: const Duration(milliseconds: 60),
++                  child: OutlinedButton.icon(
++                    onPressed: () => context.push('/loans/${widget.applicationId}/kfs', extra: offer),
++                    icon: const Icon(Icons.description_outlined),
++                    label: const Text('View Key Facts Statement'),
++                  ),
++                ),
++                const SizedBox(height: AppSpacing.xl),
++                if (offer.status == OfferStatus.issued && !offer.isExpired) ...[
++                  PrimaryButton(
++                    label: 'Accept offer',
++                    isLoading: _isActing,
++                    onPressed: _accept,
++                  ),
++                  const SizedBox(height: AppSpacing.sm),
++                  SecondaryButton(label: 'Decline', onPressed: _isActing ? null : _decline),
++                ] else if (offer.status == OfferStatus.accepted) ...[
++                  PrimaryButton(
++                    label: 'Continue to agreement',
++                    onPressed: () => context.push('/loans/${widget.applicationId}/agreement'),
++                  ),
++                ] else if (offer.status == OfferStatus.declined) ...[
++                  Text('You declined this offer.', style: theme.textTheme.bodyMedium),
++                ],
++              ],
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++class _OfferStatusChip extends StatelessWidget {
++  const _OfferStatusChip({required this.status});
++  final OfferStatus status;
++
++  @override
++  Widget build(BuildContext context) {
++    switch (status) {
++      case OfferStatus.issued:
++        return const StatusChip(label: 'Awaiting your response', tone: StatusTone.info);
++      case OfferStatus.accepted:
++        return const StatusChip(label: 'Accepted', tone: StatusTone.success);
++      case OfferStatus.declined:
++        return const StatusChip(label: 'Declined', tone: StatusTone.neutral);
++      case OfferStatus.expired:
++        return const StatusChip(label: 'Expired', tone: StatusTone.danger);
++    }
++  }
++}
++
++class _Row extends StatelessWidget {
++  const _Row(this.label, this.value, {this.emphasize = false});
++  final String label;
++  final String value;
++  final bool emphasize;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 4),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: theme.textTheme.bodyMedium),
++          Text(
++            value,
++            style: emphasize
++                ? theme.textTheme.titleMedium
++                : theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/loan_lifecycle/presentation/repayment_screen.dart b/lib/features/loan_lifecycle/presentation/repayment_screen.dart
+new file mode 100644
+index 0000000..c96d3ba
+--- /dev/null
++++ b/lib/features/loan_lifecycle/presentation/repayment_screen.dart
+@@ -0,0 +1,361 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/theme/app_theme.dart';
++import '../../../core/utils/formatters.dart';
++import '../../../core/widgets/buttons.dart';
++import '../../../core/widgets/feedback.dart';
++import '../../../core/widgets/motion_widgets.dart';
++import '../application/loan_journey_controller.dart';
++import '../data/loan_lifecycle_models.dart';
++
++class RepaymentScreen extends ConsumerWidget {
++  const RepaymentScreen({super.key, required this.applicationId});
++
++  final String applicationId;
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final theme = Theme.of(context);
++    final snapshotAsync = ref.watch(loanJourneyControllerProvider(applicationId));
++
++    return Scaffold(
++      appBar: AppBar(title: const Text('Repayment')),
++      body: snapshotAsync.when(
++        loading: () => const Center(child: CircularProgressIndicator()),
++        error: (e, _) => Center(child: Text('$e')),
++        data: (snapshot) {
++          final schedule = snapshot.schedule;
++          if (schedule == null) {
++            return Center(
++              child: Text('No active loan yet.', style: theme.textTheme.bodyMedium),
++            );
++          }
++
++          final nextDue = schedule.nextDue;
++
++          return RefreshIndicator(
++            onRefresh: () => ref
++                .read(loanJourneyControllerProvider(applicationId).notifier)
++                .refreshQuietly(),
++            child: ListView(
++              padding: const EdgeInsets.all(AppSpacing.lg),
++              children: [
++                FadeSlideIn(
++                  child: Card(
++                    child: Padding(
++                      padding: const EdgeInsets.all(AppSpacing.lg),
++                      child: Column(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Text('Outstanding balance', style: theme.textTheme.bodyMedium),
++                          Text(
++                            AppFormatters.currency(schedule.totalOutstanding),
++                            style: theme.textTheme.displayLarge,
++                          ),
++                          if (schedule.isFullyPaid) ...[
++                            const SizedBox(height: AppSpacing.sm),
++                            const Row(
++                              children: [
++                                Icon(Icons.check_circle_rounded, color: AppColors.success, size: 18),
++                                SizedBox(width: 6),
++                                Text('Loan fully repaid', style: TextStyle(color: AppColors.success, fontWeight: FontWeight.w600)),
++                              ],
++                            ),
++                          ] else if (nextDue != null) ...[
++                            const SizedBox(height: AppSpacing.md),
++                            Row(
++                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                              children: [
++                                Column(
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                    Text('Next EMI due', style: theme.textTheme.bodySmall),
++                                    Text(
++                                      AppFormatters.date(nextDue.dueDate),
++                                      style: theme.textTheme.titleMedium,
++                                    ),
++                                  ],
++                                ),
++                                Text(
++                                  AppFormatters.currency(nextDue.amountRemaining),
++                                  style: theme.textTheme.titleLarge,
++                                ),
++                              ],
++                            ),
++                            const SizedBox(height: AppSpacing.md),
++                            PrimaryButton(
++                              label: 'Pay now',
++                              onPressed: () => _openPaymentSheet(context, ref, nextDue),
++                            ),
++                          ],
++                        ],
++                      ),
++                    ),
++                  ),
++                ),
++                const SizedBox(height: AppSpacing.xl),
++                Text('Schedule', style: theme.textTheme.titleLarge),
++                const SizedBox(height: AppSpacing.sm),
++                ...schedule.installments.map((i) => _InstallmentTile(installment: i)),
++                const SizedBox(height: AppSpacing.xl),
++                Text('Payment history', style: theme.textTheme.titleLarge),
++                const SizedBox(height: AppSpacing.sm),
++                if (snapshot.payments.isEmpty)
++                  Padding(
++                    padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
++                    child: Text('No payments yet.', style: theme.textTheme.bodySmall),
++                  )
++                else
++                  ...snapshot.payments.map((p) => _PaymentTile(payment: p)),
++              ],
++            ),
++          );
++        },
++      ),
++    );
++  }
++
++  Future<void> _openPaymentSheet(
++    BuildContext context,
++    WidgetRef ref,
++    RepaymentInstallment installment,
++  ) async {
++    await showModalBottomSheet(
++      context: context,
++      isScrollControlled: true,
++      backgroundColor: Colors.transparent,
++      builder: (sheetContext) => _PaymentSheet(
++        applicationId: applicationId,
++        installment: installment,
++      ),
++    );
++  }
++}
++
++class _InstallmentTile extends StatelessWidget {
++  const _InstallmentTile({required this.installment});
++  final RepaymentInstallment installment;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Padding(
++      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++      child: Card(
++        child: Padding(
++          padding: const EdgeInsets.all(AppSpacing.md),
++          child: Row(
++            children: [
++              CircleAvatar(
++                radius: 16,
++                backgroundColor: theme.colorScheme.primary.withOpacity(0.1),
++                child: Text(
++                  '${installment.installmentNumber}',
++                  style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.primary),
++                ),
++              ),
++              const SizedBox(width: AppSpacing.md),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Text(AppFormatters.date(installment.dueDate), style: theme.textTheme.bodyMedium),
++                    Text(
++                      AppFormatters.currency(installment.amountDue),
++                      style: theme.textTheme.titleMedium,
++                    ),
++                  ],
++                ),
++              ),
++              _installmentChip(installment.status),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++
++  Widget _installmentChip(InstallmentStatus status) {
++    switch (status) {
++      case InstallmentStatus.paid:
++        return const StatusChip(label: 'Paid', tone: StatusTone.success);
++      case InstallmentStatus.due:
++        return const StatusChip(label: 'Due', tone: StatusTone.warning);
++      case InstallmentStatus.overdue:
++        return const StatusChip(label: 'Overdue', tone: StatusTone.danger);
++      case InstallmentStatus.partiallyPaid:
++        return const StatusChip(label: 'Partially paid', tone: StatusTone.info);
++      case InstallmentStatus.upcoming:
++        return const StatusChip(label: 'Upcoming', tone: StatusTone.neutral);
++    }
++  }
++}
++
++class _PaymentTile extends StatelessWidget {
++  const _PaymentTile({required this.payment});
++  final Payment payment;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Padding(
++      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++      child: Card(
++        child: Padding(
++          padding: const EdgeInsets.all(AppSpacing.md),
++          child: Row(
++            children: [
++              const Icon(Icons.receipt_long_rounded, color: AppColors.success),
++              const SizedBox(width: AppSpacing.md),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Text(AppFormatters.currency(payment.amount), style: theme.textTheme.titleMedium),
++                    Text(
++                      '${_methodLabel(payment.method)} · ${AppFormatters.relativeShort(payment.createdAt)}',
++                      style: theme.textTheme.bodySmall,
++                    ),
++                  ],
++                ),
++              ),
++              const StatusChip(label: 'Success', tone: StatusTone.success),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++
++  String _methodLabel(PaymentMethod method) {
++    switch (method) {
++      case PaymentMethod.upi:
++        return 'UPI';
++      case PaymentMethod.debitCard:
++        return 'Debit card';
++      case PaymentMethod.netBanking:
++        return 'Net banking';
++    }
++  }
++}
++
++class _PaymentSheet extends ConsumerStatefulWidget {
++  const _PaymentSheet({required this.applicationId, required this.installment});
++  final String applicationId;
++  final RepaymentInstallment installment;
++
++  @override
++  ConsumerState<_PaymentSheet> createState() => _PaymentSheetState();
++}
++
++class _PaymentSheetState extends ConsumerState<_PaymentSheet> {
++  PaymentMethod _method = PaymentMethod.upi;
++  bool _isPaying = false;
++  bool _success = false;
++
++  Future<void> _pay() async {
++    setState(() => _isPaying = true);
++    await ref.read(loanJourneyControllerProvider(widget.applicationId).notifier).makePayment(
++          amount: widget.installment.amountRemaining,
++          method: _method,
++          installmentNumbers: [widget.installment.installmentNumber],
++        );
++    if (mounted) {
++      setState(() {
++        _isPaying = false;
++        _success = true;
++      });
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++
++    return Container(
++      padding: EdgeInsets.only(
++        left: AppSpacing.lg,
++        right: AppSpacing.lg,
++        top: AppSpacing.lg,
++        bottom: MediaQuery.of(context).viewInsets.bottom + AppSpacing.lg,
++      ),
++      decoration: BoxDecoration(
++        color: theme.scaffoldBackgroundColor,
++        borderRadius: const BorderRadius.vertical(top: Radius.circular(AppSpacing.radiusLg)),
++      ),
++      child: _success
++          ? Column(
++              mainAxisSize: MainAxisSize.min,
++              children: [
++                const SuccessCheckAnimation(size: 80),
++                const SizedBox(height: AppSpacing.md),
++                Text('Payment successful', style: theme.textTheme.headlineSmall),
++                const SizedBox(height: AppSpacing.xs),
++                Text(
++                  AppFormatters.currency(widget.installment.amountRemaining),
++                  style: theme.textTheme.bodyMedium,
++                ),
++                const SizedBox(height: AppSpacing.lg),
++                PrimaryButton(label: 'Done', onPressed: () => Navigator.of(context).pop()),
++              ],
++            )
++          : Column(
++              mainAxisSize: MainAxisSize.min,
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text('Pay EMI', style: theme.textTheme.headlineSmall),
++                const SizedBox(height: AppSpacing.xs),
++                Text(
++                  AppFormatters.currency(widget.installment.amountRemaining),
++                  style: theme.textTheme.displayMedium,
++                ),
++                const SizedBox(height: AppSpacing.lg),
++                ..._methodTile(PaymentMethod.upi, 'UPI', Icons.qr_code_rounded),
++                ..._methodTile(PaymentMethod.debitCard, 'Debit card', Icons.credit_card_rounded),
++                ..._methodTile(PaymentMethod.netBanking, 'Net banking', Icons.account_balance_rounded),
++                const SizedBox(height: AppSpacing.lg),
++                PrimaryButton(
++                  label: _isPaying ? 'Processing…' : 'Pay now',
++                  isLoading: _isPaying,
++                  onPressed: _pay,
++                ),
++              ],
++            ),
++    );
++  }
++
++  List<Widget> _methodTile(PaymentMethod method, String label, IconData icon) {
++    final selected = _method == method;
++    final theme = Theme.of(context);
++    return [
++      InkWell(
++        borderRadius: BorderRadius.circular(AppSpacing.radiusMd),
++        onTap: _isPaying ? null : () => setState(() => _method = method),
++        child: Container(
++          margin: const EdgeInsets.only(bottom: AppSpacing.sm),
++          padding: const EdgeInsets.all(AppSpacing.md),
++          decoration: BoxDecoration(
++            borderRadius: BorderRadius.circular(AppSpacing.radiusMd),
++            border: Border.all(
++              color: selected ? theme.colorScheme.primary : AppColors.lightBorder,
++              width: selected ? 1.6 : 1,
++            ),
++          ),
++          child: Row(
++            children: [
++              Icon(icon, color: selected ? theme.colorScheme.primary : null),
++              const SizedBox(width: AppSpacing.md),
++              Expanded(child: Text(label, style: theme.textTheme.bodyLarge)),
++              Radio<PaymentMethod>(
++                value: method,
++                groupValue: _method,
++                onChanged: _isPaying ? null : (v) => setState(() => _method = v!),
++              ),
++            ],
++          ),
++        ),
++      ),
++    ];
++  }
++}
+diff --git a/lib/features/loans/presentation/loan_detail_screen.dart b/lib/features/loans/presentation/loan_detail_screen.dart
+index c78cb0e..743f005 100644
+--- a/lib/features/loans/presentation/loan_detail_screen.dart
++++ b/lib/features/loans/presentation/loan_detail_screen.dart
+@@ -1,7 +1,9 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:go_router/go_router.dart';
+ 
+ import '../../../core/network/api_exception.dart';
++import '../../../core/router/route_paths.dart';
+ import '../../../core/theme/app_theme.dart';
+ import '../../../core/utils/formatters.dart';
+ import '../../../core/widgets/buttons.dart';
+@@ -83,6 +85,20 @@ class LoanDetailScreen extends ConsumerWidget {
+                     },
+                   ),
+                 ],
++                if (application.status == 'APPROVED') ...[
++                  const SizedBox(height: AppSpacing.xl),
++                  PrimaryButton(
++                    label: 'Continue your loan',
++                    icon: Icons.arrow_forward_rounded,
++                    onPressed: () => context.push(
++                      RoutePaths.loanOffer(application.id),
++                      extra: {
++                        'requestedAmount': application.requestedAmount,
++                        'requestedTenureDays': application.requestedTenureDays,
++                      },
++                    ),
++                  ),
++                ],
+               ],
+             );
+           },

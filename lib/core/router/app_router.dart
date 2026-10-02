@@ -9,6 +9,13 @@ import '../../features/documents/presentation/documents_screen.dart';
 import '../../features/home/presentation/home_shell.dart';
 import '../../features/loans/presentation/loan_apply_screen.dart';
 import '../../features/loans/presentation/loan_detail_screen.dart';
+import '../../features/loan_lifecycle/data/loan_lifecycle_models.dart';
+import '../../features/loan_lifecycle/presentation/agreement_esign_screen.dart';
+import '../../features/loan_lifecycle/presentation/bank_verification_screen.dart';
+import '../../features/loan_lifecycle/presentation/disbursement_status_screen.dart';
+import '../../features/loan_lifecycle/presentation/kfs_screen.dart';
+import '../../features/loan_lifecycle/presentation/loan_offer_screen.dart';
+import '../../features/loan_lifecycle/presentation/repayment_screen.dart';
 import '../../features/onboarding/application/onboarding_controller.dart';
 import '../../features/onboarding/presentation/identity_verification_screen.dart';
 import '../../features/onboarding/presentation/kyc_screen.dart';
@@ -87,6 +94,45 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: RoutePaths.loanDetailPattern,
         builder: (context, state) => LoanDetailScreen(
+          applicationId: state.pathParameters['id']!,
+        ),
+      ),
+      GoRoute(
+        path: RoutePaths.loanOfferPattern,
+        builder: (context, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          return LoanOfferScreen(
+            applicationId: state.pathParameters['id']!,
+            requestedAmount: (extra?['requestedAmount'] as num?) ?? 0,
+            requestedTenureDays: (extra?['requestedTenureDays'] as int?) ?? 30,
+          );
+        },
+      ),
+      GoRoute(
+        path: RoutePaths.loanKfsPattern,
+        builder: (context, state) => KfsScreen(offer: state.extra as LoanOffer),
+      ),
+      GoRoute(
+        path: RoutePaths.loanAgreementPattern,
+        builder: (context, state) => AgreementESignScreen(
+          applicationId: state.pathParameters['id']!,
+        ),
+      ),
+      GoRoute(
+        path: RoutePaths.loanBankAccountPattern,
+        builder: (context, state) => BankVerificationScreen(
+          applicationId: state.pathParameters['id']!,
+        ),
+      ),
+      GoRoute(
+        path: RoutePaths.loanDisbursementPattern,
+        builder: (context, state) => DisbursementStatusScreen(
+          applicationId: state.pathParameters['id']!,
+        ),
+      ),
+      GoRoute(
+        path: RoutePaths.loanRepaymentPattern,
+        builder: (context, state) => RepaymentScreen(
           applicationId: state.pathParameters['id']!,
         ),
       ),

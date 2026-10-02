@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/network/api_exception.dart';
+import '../../../core/router/route_paths.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../core/widgets/buttons.dart';
@@ -81,6 +83,20 @@ class LoanDetailScreen extends ConsumerWidget {
                         }
                       }
                     },
+                  ),
+                ],
+                if (application.status == 'APPROVED') ...[
+                  const SizedBox(height: AppSpacing.xl),
+                  PrimaryButton(
+                    label: 'Continue your loan',
+                    icon: Icons.arrow_forward_rounded,
+                    onPressed: () => context.push(
+                      RoutePaths.loanOffer(application.id),
+                      extra: {
+                        'requestedAmount': application.requestedAmount,
+                        'requestedTenureDays': application.requestedTenureDays,
+                      },
+                    ),
                   ),
                 ],
               ],
