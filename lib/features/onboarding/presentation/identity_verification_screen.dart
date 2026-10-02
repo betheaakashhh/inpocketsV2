@@ -14,15 +14,12 @@ import '../../../core/widgets/feedback.dart';
 import '../application/onboarding_controller.dart';
 import 'onboarding_step_scaffold.dart';
 
-/// KNOWN BACKEND GAP: there is currently no public endpoint to persist
-/// the actual selfie image against an identity-verification record —
-/// only `capture_ref` (an opaque string) is accepted. This screen
-/// captures a real selfie for a genuine on-device UX and generates a
-/// local reference for it, but the image itself is not uploaded
-/// anywhere yet. Before launch, expose an endpoint (e.g. multipart on
-/// POST /onboarding/identity-verification/capture, or reuse the
-/// Documents API with an IDENTITY_VERIFICATION owner type) and wire the
-/// upload in `_submitCapture` below.
+/// The camera capture itself is intentionally local-first. Network access is
+/// required only when the user submits the captured image/reference.
+///
+/// This prevents a temporary backend disconnect from blocking the camera and,
+/// more importantly, prevents a server-created PENDING record from being
+/// presented as if a selfie had already been submitted.
 class IdentityVerificationScreen extends ConsumerStatefulWidget {
   const IdentityVerificationScreen({super.key});
 
@@ -44,7 +41,10 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   }
 
   void _ensurePolling(String status) {
-    final shouldPoll = status == 'PENDING' || status == 'PROCESSING';
+    // PENDING means the identity record exists but a capture has not been
+    // submitted by this client yet. Only PROCESSING represents a submitted
+    // verification that should be polled.
+    final shouldPoll = status == 'PROCESSING';
     if (shouldPoll && _pollTimer == null) {
       _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
         ref.read(onboardingControllerProvider.notifier).refreshQuietly();
@@ -58,18 +58,15 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   Future<void> _captureSelfie() async {
     setState(() => _isBusy = true);
     try {
-      final identity = ref.read(onboardingControllerProvider).value?.identity;
-      if (identity == null) {
-        await ref.read(onboardingControllerProvider.notifier).startIdentity();
-      }
-
+      // Do not call the backend before opening the camera. A connectivity
+      // failure must not prevent the user from capturing a selfie locally.
       final photo = await _picker.pickImage(
         source: ImageSource.camera,
         preferredCameraDevice: CameraDevice.front,
         maxWidth: 1280,
         imageQuality: 85,
       );
-      if (photo != null) {
+      if (photo != null && mounted) {
         setState(() => _capturedImage = File(photo.path));
       }
     } on ApiException catch (e) {
@@ -93,16 +90,30 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
 
     setState(() => _isBusy = true);
     try {
+      // The identity record is only needed when submitting. If it doesn't
+      // exist yet, create it now; this is safe to retry after reconnecting.
+      var identity = ref.read(onboardingControllerProvider).value?.identity;
+      if (identity == null) {
+        identity = await ref
+            .read(onboardingControllerProvider.notifier)
+            .startIdentity();
+      }
+
       final bytesLength = await image.length();
-      // Placeholder reference — see the file-level note on the missing
-      // upload endpoint. Once that endpoint exists, upload `image` there
-      // first and use its real document/version id as the ref instead.
+      // Current backend contract accepts only an opaque capture_ref. Keep the
+      // local image until the submit request succeeds. The actual image upload
+      // will be wired when the backend exposes the capture upload contract.
       final captureRef =
           'selfie_${DateTime.now().millisecondsSinceEpoch}_$bytesLength';
 
-      await ref.read(onboardingControllerProvider.notifier).submitIdentityCapture(captureRef);
+      await ref
+          .read(onboardingControllerProvider.notifier)
+          .submitIdentityCapture(captureRef);
+
       if (mounted) setState(() => _capturedImage = null);
     } on ApiException catch (e) {
+      // Do not clear the captured image on connectivity/API failure. The user
+      // can reconnect and press Submit again without retaking the selfie.
       if (mounted) showAppSnackbar(context, e.message, type: ToastType.error);
     } finally {
       if (mounted) setState(() => _isBusy = false);
@@ -131,6 +142,7 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
 
     final showStatusCard = _capturedImage == null &&
         identity != null &&
+        identity.status != 'PENDING' &&
         identity.status != 'RETRY_REQUIRED' &&
         identity.status != 'FAILED';
 
@@ -189,14 +201,20 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       );
     }
 
+    // PENDING is intentionally actionable. The backend can create the
+    // identity record before a capture is submitted, so PENDING must not lock
+    // the user behind a status card.
     if (identity != null &&
+        identity.status != 'PENDING' &&
         identity.status != 'FAILED' &&
         identity.status != 'RETRY_REQUIRED') {
-      return null; // status card is showing; nothing actionable right now
+      return null;
     }
 
     return PrimaryButton(
-      label: identity == null ? 'Take a selfie' : 'Retake selfie',
+      label: identity == null || identity.status == 'PENDING'
+          ? 'Take a selfie'
+          : 'Retake selfie',
       isLoading: _isBusy,
       onPressed: _captureSelfie,
     );
@@ -249,7 +267,7 @@ class _IdentityStatusCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isPending = status == 'PENDING' || status == 'PROCESSING';
+    final isProcessing = status == 'PROCESSING';
 
     return Card(
       child: Padding(
@@ -265,7 +283,7 @@ class _IdentityStatusCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: AppSpacing.sm),
-            if (isPending)
+            if (isProcessing)
               Row(
                 children: [
                   const SizedBox(
@@ -286,7 +304,9 @@ class _IdentityStatusCard extends StatelessWidget {
               Text(
                 'Your selfie is under manual review by our team.',
                 style: theme.textTheme.bodySmall,
-              ),
+              )
+            else if (reason != null)
+              Text(reason!, style: theme.textTheme.bodySmall),
           ],
         ),
       ),
