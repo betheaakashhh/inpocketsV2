@@ -41,8 +41,11 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
     super.dispose();
   }
 
-  void _ensurePolling(String status) {
-    final shouldPoll = status == 'PROCESSING' || status == 'PENDING';
+  void _ensurePolling(String status, {required bool awaitOnboardingCompletion}) {
+    final shouldPoll = status == 'PROCESSING' ||
+        status == 'PENDING' ||
+        (status == 'VERIFIED' && awaitOnboardingCompletion);
+
     if (shouldPoll && _pollTimer == null) {
       _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
         await ref.read(onboardingControllerProvider.notifier).refreshQuietly();
@@ -101,7 +104,10 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       if (currentIdentity?.status == 'PROCESSING' ||
           currentIdentity?.status == 'VERIFIED' ||
           currentIdentity?.status == 'MANUAL_REVIEW') {
-        _ensurePolling(currentIdentity!.status);
+        _ensurePolling(
+          currentIdentity!.status,
+          awaitOnboardingCompletion: !(_isOnboardingComplete()),
+        );
         if (mounted) {
           setState(() {
             _capturedImage = null;
@@ -123,7 +129,10 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       if (refreshedIdentity?.status == 'PROCESSING' ||
           refreshedIdentity?.status == 'VERIFIED' ||
           refreshedIdentity?.status == 'MANUAL_REVIEW') {
-        _ensurePolling(refreshedIdentity!.status);
+        _ensurePolling(
+          refreshedIdentity!.status,
+          awaitOnboardingCompletion: !(_isOnboardingComplete()),
+        );
         if (mounted) {
           setState(() {
             _capturedImage = null;
@@ -159,6 +168,10 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
     }
   }
 
+  bool _isOnboardingComplete() {
+    return ref.read(onboardingControllerProvider).value?.record.isCompleted ?? false;
+  }
+
   void _retake() {
     setState(() {
       _capturedImage = null;
@@ -174,13 +187,21 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       final wasCompleted = previous?.value?.record.isCompleted ?? false;
       final isCompleted = next.value?.record.isCompleted ?? false;
       if (!wasCompleted && isCompleted) {
+        _pollTimer?.cancel();
+        _pollTimer = null;
         context.go(RoutePaths.onboardingComplete);
       }
     });
 
     final snapshotAsync = ref.watch(onboardingControllerProvider);
     final identity = snapshotAsync.value?.identity;
-    if (identity != null) _ensurePolling(identity.status);
+    final isOnboardingComplete = snapshotAsync.value?.record.isCompleted ?? false;
+    if (identity != null) {
+      _ensurePolling(
+        identity.status,
+        awaitOnboardingCompletion: !isOnboardingComplete,
+      );
+    }
 
     final showStatusCard = _capturedImage == null &&
         identity != null &&
