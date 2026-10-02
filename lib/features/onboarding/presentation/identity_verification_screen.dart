@@ -14,15 +14,12 @@ import '../../../core/widgets/feedback.dart';
 import '../application/onboarding_controller.dart';
 import 'onboarding_step_scaffold.dart';
 
-/// KNOWN BACKEND GAP: there is currently no public endpoint to persist
-/// the actual selfie image against an identity-verification record —
-/// only `capture_ref` (an opaque string) is accepted. This screen
-/// captures a real selfie for a genuine on-device UX and generates a
-/// local reference for it, but the image itself is not uploaded
-/// anywhere yet. Before launch, expose an endpoint (e.g. multipart on
-/// POST /onboarding/identity-verification/capture, or reuse the
-/// Documents API with an IDENTITY_VERIFICATION owner type) and wire the
-/// upload in `_submitCapture` below.
+/// The camera capture itself is intentionally local-first. Network access is
+/// required only when the user submits the captured image/reference.
+///
+/// A capture reference belongs to the captured selfie, not to an individual
+/// HTTP attempt. This lets a retry reuse the same submission identifier after
+/// a response-loss/network failure.
 class IdentityVerificationScreen extends ConsumerStatefulWidget {
   const IdentityVerificationScreen({super.key});
 
@@ -35,6 +32,7 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   final _picker = ImagePicker();
   Timer? _pollTimer;
   File? _capturedImage;
+  String? _captureRef;
   bool _isBusy = false;
 
   @override
@@ -43,11 +41,14 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
     super.dispose();
   }
 
-  void _ensurePolling(String status) {
-    final shouldPoll = status == 'PENDING' || status == 'PROCESSING';
+  void _ensurePolling(String status, {required bool awaitOnboardingCompletion}) {
+    final shouldPoll = status == 'PROCESSING' ||
+        status == 'PENDING' ||
+        (status == 'VERIFIED' && awaitOnboardingCompletion);
+
     if (shouldPoll && _pollTimer == null) {
-      _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-        ref.read(onboardingControllerProvider.notifier).refreshQuietly();
+      _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        await ref.read(onboardingControllerProvider.notifier).refreshQuietly();
       });
     } else if (!shouldPoll && _pollTimer != null) {
       _pollTimer?.cancel();
@@ -58,19 +59,25 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   Future<void> _captureSelfie() async {
     setState(() => _isBusy = true);
     try {
-      final identity = ref.read(onboardingControllerProvider).value?.identity;
-      if (identity == null) {
-        await ref.read(onboardingControllerProvider.notifier).startIdentity();
-      }
-
       final photo = await _picker.pickImage(
         source: ImageSource.camera,
         preferredCameraDevice: CameraDevice.front,
         maxWidth: 1280,
         imageQuality: 85,
       );
-      if (photo != null) {
-        setState(() => _capturedImage = File(photo.path));
+      if (photo != null && mounted) {
+        final image = File(photo.path);
+        final bytesLength = await image.length();
+
+        // The State may have been disposed while the asynchronous file read
+        // was in progress (for example, after onboarding completion redirects).
+        if (!mounted) return;
+
+        setState(() {
+          _capturedImage = image;
+          _captureRef =
+              'selfie_${DateTime.now().millisecondsSinceEpoch}_$bytesLength';
+        });
       }
     } on ApiException catch (e) {
       if (mounted) showAppSnackbar(context, e.message, type: ToastType.error);
@@ -89,28 +96,92 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
 
   Future<void> _submitCapture() async {
     final image = _capturedImage;
-    if (image == null) return;
+    final captureRef = _captureRef;
+    if (image == null || captureRef == null) return;
 
     setState(() => _isBusy = true);
     try {
-      final bytesLength = await image.length();
-      // Placeholder reference — see the file-level note on the missing
-      // upload endpoint. Once that endpoint exists, upload `image` there
-      // first and use its real document/version id as the ref instead.
-      final captureRef =
-          'selfie_${DateTime.now().millisecondsSinceEpoch}_$bytesLength';
+      final currentIdentity = ref.read(onboardingControllerProvider).value?.identity;
 
-      await ref.read(onboardingControllerProvider.notifier).submitIdentityCapture(captureRef);
-      if (mounted) setState(() => _capturedImage = null);
+      // Only these states mean the server has already accepted a capture.
+      // FAILED and RETRY_REQUIRED must be allowed to submit a newly captured
+      // selfie.
+      if (currentIdentity?.status == 'PROCESSING' ||
+          currentIdentity?.status == 'VERIFIED' ||
+          currentIdentity?.status == 'MANUAL_REVIEW') {
+        _ensurePolling(
+          currentIdentity!.status,
+          awaitOnboardingCompletion: !(_isOnboardingComplete()),
+        );
+        if (mounted) {
+          setState(() {
+            _capturedImage = null;
+            _captureRef = null;
+          });
+        }
+        return;
+      }
+
+      // If we have a stale PENDING snapshot, refresh before posting. The
+      // previous request may already have reached the backend while its
+      // response was lost.
+      await ref
+          .read(onboardingControllerProvider.notifier)
+          .refreshQuietly();
+
+      final refreshedIdentity =
+          ref.read(onboardingControllerProvider).value?.identity;
+      if (refreshedIdentity?.status == 'PROCESSING' ||
+          refreshedIdentity?.status == 'VERIFIED' ||
+          refreshedIdentity?.status == 'MANUAL_REVIEW') {
+        _ensurePolling(
+          refreshedIdentity!.status,
+          awaitOnboardingCompletion: !(_isOnboardingComplete()),
+        );
+        if (mounted) {
+          setState(() {
+            _capturedImage = null;
+            _captureRef = null;
+          });
+        }
+        return;
+      }
+
+      if (refreshedIdentity == null) {
+        await ref
+            .read(onboardingControllerProvider.notifier)
+            .startIdentity();
+      }
+
+      await ref
+          .read(onboardingControllerProvider.notifier)
+          .submitIdentityCapture(captureRef);
+
+      if (mounted) {
+        setState(() {
+          _capturedImage = null;
+          _captureRef = null;
+        });
+      }
     } on ApiException catch (e) {
+      // Keep both the image and captureRef. If the request reached the server
+      // but its response was lost, the next Submit will refresh server state
+      // before attempting another POST.
       if (mounted) showAppSnackbar(context, e.message, type: ToastType.error);
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }
   }
 
+  bool _isOnboardingComplete() {
+    return ref.read(onboardingControllerProvider).value?.record.isCompleted ?? false;
+  }
+
   void _retake() {
-    setState(() => _capturedImage = null);
+    setState(() {
+      _capturedImage = null;
+      _captureRef = null;
+    });
   }
 
   @override
@@ -121,16 +192,25 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       final wasCompleted = previous?.value?.record.isCompleted ?? false;
       final isCompleted = next.value?.record.isCompleted ?? false;
       if (!wasCompleted && isCompleted) {
+        _pollTimer?.cancel();
+        _pollTimer = null;
         context.go(RoutePaths.onboardingComplete);
       }
     });
 
     final snapshotAsync = ref.watch(onboardingControllerProvider);
     final identity = snapshotAsync.value?.identity;
-    if (identity != null) _ensurePolling(identity.status);
+    final isOnboardingComplete = snapshotAsync.value?.record.isCompleted ?? false;
+    if (identity != null) {
+      _ensurePolling(
+        identity.status,
+        awaitOnboardingCompletion: !isOnboardingComplete,
+      );
+    }
 
     final showStatusCard = _capturedImage == null &&
         identity != null &&
+        identity.status != 'PENDING' &&
         identity.status != 'RETRY_REQUIRED' &&
         identity.status != 'FAILED';
 
@@ -190,13 +270,16 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
     }
 
     if (identity != null &&
+        identity.status != 'PENDING' &&
         identity.status != 'FAILED' &&
         identity.status != 'RETRY_REQUIRED') {
-      return null; // status card is showing; nothing actionable right now
+      return null;
     }
 
     return PrimaryButton(
-      label: identity == null ? 'Take a selfie' : 'Retake selfie',
+      label: identity == null || identity.status == 'PENDING'
+          ? 'Take a selfie'
+          : 'Retake selfie',
       isLoading: _isBusy,
       onPressed: _captureSelfie,
     );
@@ -249,7 +332,7 @@ class _IdentityStatusCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isPending = status == 'PENDING' || status == 'PROCESSING';
+    final isProcessing = status == 'PROCESSING';
 
     return Card(
       child: Padding(
@@ -265,7 +348,7 @@ class _IdentityStatusCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: AppSpacing.sm),
-            if (isPending)
+            if (isProcessing)
               Row(
                 children: [
                   const SizedBox(
@@ -286,7 +369,9 @@ class _IdentityStatusCard extends StatelessWidget {
               Text(
                 'Your selfie is under manual review by our team.',
                 style: theme.textTheme.bodySmall,
-              ),
+              )
+            else if (reason != null)
+              Text(reason!, style: theme.textTheme.bodySmall),
           ],
         ),
       ),
