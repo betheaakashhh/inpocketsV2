@@ -42,10 +42,10 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   }
 
   void _ensurePolling(String status) {
-    final shouldPoll = status == 'PROCESSING';
+    final shouldPoll = status == 'PROCESSING' || status == 'PENDING';
     if (shouldPoll && _pollTimer == null) {
-      _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-        ref.read(onboardingControllerProvider.notifier).refreshQuietly();
+      _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        await ref.read(onboardingControllerProvider.notifier).refreshQuietly();
       });
     } else if (!shouldPoll && _pollTimer != null) {
       _pollTimer?.cancel();
@@ -67,8 +67,6 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
         final bytesLength = await image.length();
         setState(() {
           _capturedImage = image;
-          // Create the submission identifier once for this captured image.
-          // Retries must reuse it rather than generating a new capture_ref.
           _captureRef =
               'selfie_${DateTime.now().millisecondsSinceEpoch}_$bytesLength';
         });
@@ -95,45 +93,48 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
 
     setState(() => _isBusy = true);
     try {
-      // Before retrying, refresh the server state. The previous request may
-      // already have reached the backend even if its response was lost.
-      // Never submit a second capture when the server already accepted it.
       final currentIdentity = ref.read(onboardingControllerProvider).value?.identity;
-      if (currentIdentity != null && currentIdentity.status != 'PENDING') {
-        if (currentIdentity.status == 'PROCESSING') {
-          _ensurePolling(currentIdentity.status);
-          if (mounted) setState(() => _capturedImage = null);
-          return;
-        }
 
-        if (currentIdentity.status == 'VERIFIED' ||
-            currentIdentity.status == 'MANUAL_REVIEW') {
-          if (mounted) setState(() => _capturedImage = null);
-          return;
+      // Only these states mean the server has already accepted a capture.
+      // FAILED and RETRY_REQUIRED must be allowed to submit a newly captured
+      // selfie.
+      if (currentIdentity?.status == 'PROCESSING' ||
+          currentIdentity?.status == 'VERIFIED' ||
+          currentIdentity?.status == 'MANUAL_REVIEW') {
+        _ensurePolling(currentIdentity!.status);
+        if (mounted) {
+          setState(() {
+            _capturedImage = null;
+            _captureRef = null;
+          });
         }
+        return;
       }
 
-      // If we have a stale PENDING snapshot, refresh before posting. This is
-      // the important response-loss race: the backend may already be
-      // PROCESSING while the client still thinks it is PENDING.
+      // If we have a stale PENDING snapshot, refresh before posting. The
+      // previous request may already have reached the backend while its
+      // response was lost.
       await ref
           .read(onboardingControllerProvider.notifier)
           .refreshQuietly();
 
       final refreshedIdentity =
           ref.read(onboardingControllerProvider).value?.identity;
-      if (refreshedIdentity != null &&
-          refreshedIdentity.status != 'PENDING') {
-        if (refreshedIdentity.status == 'PROCESSING') {
-          _ensurePolling(refreshedIdentity.status);
+      if (refreshedIdentity?.status == 'PROCESSING' ||
+          refreshedIdentity?.status == 'VERIFIED' ||
+          refreshedIdentity?.status == 'MANUAL_REVIEW') {
+        _ensurePolling(refreshedIdentity!.status);
+        if (mounted) {
+          setState(() {
+            _capturedImage = null;
+            _captureRef = null;
+          });
         }
-        if (mounted) setState(() => _capturedImage = null);
         return;
       }
 
-      var identity = refreshedIdentity;
-      if (identity == null) {
-        identity = await ref
+      if (refreshedIdentity == null) {
+        await ref
             .read(onboardingControllerProvider.notifier)
             .startIdentity();
       }
@@ -150,8 +151,8 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       }
     } on ApiException catch (e) {
       // Keep both the image and captureRef. If the request reached the server
-      // but its response was lost, the next Submit will refresh the server
-      // state before attempting another POST.
+      // but its response was lost, the next Submit will refresh server state
+      // before attempting another POST.
       if (mounted) showAppSnackbar(context, e.message, type: ToastType.error);
     } finally {
       if (mounted) setState(() => _isBusy = false);
