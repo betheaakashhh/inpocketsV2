@@ -17,9 +17,9 @@ import 'onboarding_step_scaffold.dart';
 /// The camera capture itself is intentionally local-first. Network access is
 /// required only when the user submits the captured image/reference.
 ///
-/// This prevents a temporary backend disconnect from blocking the camera and,
-/// more importantly, prevents a server-created PENDING record from being
-/// presented as if a selfie had already been submitted.
+/// A capture reference belongs to the captured selfie, not to an individual
+/// HTTP attempt. This lets a retry reuse the same submission identifier after
+/// a response-loss/network failure.
 class IdentityVerificationScreen extends ConsumerStatefulWidget {
   const IdentityVerificationScreen({super.key});
 
@@ -32,6 +32,7 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   final _picker = ImagePicker();
   Timer? _pollTimer;
   File? _capturedImage;
+  String? _captureRef;
   bool _isBusy = false;
 
   @override
@@ -41,9 +42,6 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   }
 
   void _ensurePolling(String status) {
-    // PENDING means the identity record exists but a capture has not been
-    // submitted by this client yet. Only PROCESSING represents a submitted
-    // verification that should be polled.
     final shouldPoll = status == 'PROCESSING';
     if (shouldPoll && _pollTimer == null) {
       _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -58,8 +56,6 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   Future<void> _captureSelfie() async {
     setState(() => _isBusy = true);
     try {
-      // Do not call the backend before opening the camera. A connectivity
-      // failure must not prevent the user from capturing a selfie locally.
       final photo = await _picker.pickImage(
         source: ImageSource.camera,
         preferredCameraDevice: CameraDevice.front,
@@ -67,7 +63,15 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
         imageQuality: 85,
       );
       if (photo != null && mounted) {
-        setState(() => _capturedImage = File(photo.path));
+        final image = File(photo.path);
+        final bytesLength = await image.length();
+        setState(() {
+          _capturedImage = image;
+          // Create the submission identifier once for this captured image.
+          // Retries must reuse it rather than generating a new capture_ref.
+          _captureRef =
+              'selfie_${DateTime.now().millisecondsSinceEpoch}_$bytesLength';
+        });
       }
     } on ApiException catch (e) {
       if (mounted) showAppSnackbar(context, e.message, type: ToastType.error);
@@ -86,34 +90,68 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
 
   Future<void> _submitCapture() async {
     final image = _capturedImage;
-    if (image == null) return;
+    final captureRef = _captureRef;
+    if (image == null || captureRef == null) return;
 
     setState(() => _isBusy = true);
     try {
-      // The identity record is only needed when submitting. If it doesn't
-      // exist yet, create it now; this is safe to retry after reconnecting.
-      var identity = ref.read(onboardingControllerProvider).value?.identity;
+      // Before retrying, refresh the server state. The previous request may
+      // already have reached the backend even if its response was lost.
+      // Never submit a second capture when the server already accepted it.
+      final currentIdentity = ref.read(onboardingControllerProvider).value?.identity;
+      if (currentIdentity != null && currentIdentity.status != 'PENDING') {
+        if (currentIdentity.status == 'PROCESSING') {
+          _ensurePolling(currentIdentity.status);
+          if (mounted) setState(() => _capturedImage = null);
+          return;
+        }
+
+        if (currentIdentity.status == 'VERIFIED' ||
+            currentIdentity.status == 'MANUAL_REVIEW') {
+          if (mounted) setState(() => _capturedImage = null);
+          return;
+        }
+      }
+
+      // If we have a stale PENDING snapshot, refresh before posting. This is
+      // the important response-loss race: the backend may already be
+      // PROCESSING while the client still thinks it is PENDING.
+      await ref
+          .read(onboardingControllerProvider.notifier)
+          .refreshQuietly();
+
+      final refreshedIdentity =
+          ref.read(onboardingControllerProvider).value?.identity;
+      if (refreshedIdentity != null &&
+          refreshedIdentity.status != 'PENDING') {
+        if (refreshedIdentity.status == 'PROCESSING') {
+          _ensurePolling(refreshedIdentity.status);
+        }
+        if (mounted) setState(() => _capturedImage = null);
+        return;
+      }
+
+      var identity = refreshedIdentity;
       if (identity == null) {
         identity = await ref
             .read(onboardingControllerProvider.notifier)
             .startIdentity();
       }
 
-      final bytesLength = await image.length();
-      // Current backend contract accepts only an opaque capture_ref. Keep the
-      // local image until the submit request succeeds. The actual image upload
-      // will be wired when the backend exposes the capture upload contract.
-      final captureRef =
-          'selfie_${DateTime.now().millisecondsSinceEpoch}_$bytesLength';
-
       await ref
           .read(onboardingControllerProvider.notifier)
           .submitIdentityCapture(captureRef);
 
-      if (mounted) setState(() => _capturedImage = null);
+      if (mounted) {
+        setState(() {
+          _capturedImage = null;
+          _captureRef = null;
+        });
+      }
     } on ApiException catch (e) {
-      // Do not clear the captured image on connectivity/API failure. The user
-      // can reconnect and press Submit again without retaking the selfie.
+      // Keep both the image and captureRef. If the request reached the server
+      // but its response was lost, the next Submit will refresh the server
+      // state before attempting another POST.
       if (mounted) showAppSnackbar(context, e.message, type: ToastType.error);
     } finally {
       if (mounted) setState(() => _isBusy = false);
@@ -121,7 +159,10 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
   }
 
   void _retake() {
-    setState(() => _capturedImage = null);
+    setState(() {
+      _capturedImage = null;
+      _captureRef = null;
+    });
   }
 
   @override
@@ -201,9 +242,6 @@ class _IdentityVerificationScreenState extends ConsumerState<IdentityVerificatio
       );
     }
 
-    // PENDING is intentionally actionable. The backend can create the
-    // identity record before a capture is submitted, so PENDING must not lock
-    // the user behind a status card.
     if (identity != null &&
         identity.status != 'PENDING' &&
         identity.status != 'FAILED' &&
