@@ -116,6 +116,15 @@ class OnboardingController extends StateNotifier<AsyncValue<OnboardingSnapshot>>
 
   Future<IdentityVerificationModel> submitIdentityCapture(String captureRef) async {
     final result = await _repository.submitIdentityCapture(captureRef);
+
+    // Apply the successful POST result immediately. A follow-up refresh can
+    // fail because connectivity may disappear immediately after the server
+    // accepted the capture; the provider must not fall back to stale PENDING.
+    if (state.hasValue) {
+      state = AsyncValue.data(state.requireValue.copyWith(identity: result));
+    }
+
+    // Refresh is best-effort after the authoritative capture response.
     await refreshQuietly();
     return result;
   }
